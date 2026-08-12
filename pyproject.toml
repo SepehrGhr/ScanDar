@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scandar"
+version = "0.1.0"
+description = "Document scanning and enhancement: a from-scratch CNN pipeline that turns a phone photo of a page into a clean scan"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sepehr" }]
+keywords = ["computer-vision", "document-enhancement", "image-to-image", "corner-detection", "pytorch"]
+
+dependencies = [
+    "numpy>=1.26,<3",
+    "opencv-python-headless>=4.9",
+    "pillow>=10",
+    "pyyaml>=6",
+    "matplotlib>=3.8",
+    "pandas>=2.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+ocr = ["pytesseract>=0.3.10"]     # also needs the tesseract binary
+bonus = ["kornia>=0.7"]           # differentiable warping for the end-to-end fine-tune
+demo = ["gradio>=4"]
+dev = ["pytest>=8", "ipykernel>=6"]
+
+[project.scripts]
+scandar = "scandar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

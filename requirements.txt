@@ -1,0 +1,25 @@
+# ScanDar — pip requirements (Colab-friendly)
+#
+# PyTorch is intentionally NOT pinned here: Colab ships its own CUDA build, and
+# locally it is installed into the `cv` conda env (torch 2.5.1+cu121). Install it
+# separately if needed:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# Verified locally against: python 3.11.14, torch 2.5.1+cu121, numpy 2.0.1,
+# opencv 5.0.0. The code sticks to the OpenCV 4.x API surface so it also runs on
+# Colab's opencv 4.x — do not use 5.x-only functions.
+
+numpy>=1.26,<3
+opencv-python-headless>=4.9
+pillow>=10
+pyyaml>=6
+matplotlib>=3.8
+pandas>=2.0
+tqdm>=4.66
+pytest>=8
+
+# --- installed later, per phase (kept here for reference) ---
+# Phase 3 (OCR):   pytesseract>=0.3.10   + the tesseract binary
+#                  conda install -c conda-forge tesseract   (no sudo needed)
+# Phase 6 (bonus): kornia>=0.7
+# Phase 7 (demo):  gradio>=4

@@ -1,0 +1,43 @@
+# ScanDar — exact local environment (reproduces the machine the results were produced on)
+#
+#   conda env create -f environment.yml
+#   conda activate scandar
+#   pip install -e .
+#
+# The existing local env is named `cv`; this file recreates it as `scandar` on a
+# fresh machine. Training targets an RTX 3060 (6 GB) — the cu121 wheels below need
+# an NVIDIA driver >= 530.
+#
+# On Google Colab, do NOT use this file: the runtime already has torch + CUDA.
+# Run notebooks/00_colab_bootstrap.ipynb instead, which installs requirements.txt.
+
+name: scandar
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+
+  - pip:
+      # CUDA 12.1 build of PyTorch — matches the local RTX 3060 setup
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.5.1
+      - torchvision==0.20.1
+
+      - numpy==2.0.1
+      - opencv-python-headless>=4.9      # code targets the 4.x API; 5.0.0 verified too
+      - pillow>=10
+      - pyyaml>=6
+      - matplotlib>=3.8
+      - pandas>=2.0
+      - tqdm>=4.66
+      - pytest>=8
+      - ipykernel>=6
+
+      # Installed per phase, uncomment when you reach it:
+      # - pytesseract>=0.3.10   # Phase 3; also needs the tesseract binary:
+      #                         #   conda install -c conda-forge tesseract
+      # - kornia>=0.7           # Phase 6 (differentiable warping)
+      # - gradio>=4             # Phase 7 (demo app)
