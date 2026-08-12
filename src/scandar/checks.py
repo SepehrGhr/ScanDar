@@ -315,6 +315,364 @@ def check_splits() -> list[Result]:
 
 
 # ---------------------------------------------------------------------------
+# the synthetic generator
+# ---------------------------------------------------------------------------
+#: How far the rectified degraded input may sit from the clean target before the
+#: pair stops being a fair supervision signal. Sub-pixel, because the brief warns
+#: twice that misalignment punishes the model for errors it did not make.
+MAX_ALIGNMENT_SHIFT_PX = 0.5
+
+#: Mean Sobel magnitude of the degraded input over that of the clean target. The
+#: brief warns against degradation so heavy it destroys the text; measured over
+#: the shipped ranges this sits near 0.21 (0.30 mild, 0.18 hard), so a sample
+#: below this floor means the pipeline has stopped leaving anything to restore.
+MIN_DETAIL_RATIO = 0.04
+
+GENERATOR_SAMPLES = 8
+
+
+def _generator_sources(task: str = "enhance"):
+    from .config import load_config
+    from .synth import build_sources
+
+    config = load_config(paths.repo / "configs" / "base.yaml")
+    return build_sources(config, "train", task=task), config
+
+
+def check_corner_ordering() -> list[Result]:
+    """TL, TR, BR, BL, from any starting point and any winding."""
+    import numpy as np
+
+    from .geometry import order_corners
+
+    rng = np.random.default_rng(0)
+    worst = 0.0
+    for _ in range(200):
+        angle = rng.uniform(-np.pi / 5, np.pi / 5)
+        half = rng.uniform(40, 300, size=2)
+        quad = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]], dtype=float) * half
+        rotation = np.array(
+            [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        )
+        quad = quad @ rotation.T + rng.uniform(400, 800, size=2)
+        quad += rng.uniform(-12, 12, size=(4, 2))
+
+        canonical = order_corners(quad)
+        for permutation in (rng.permutation(4), rng.permutation(4), [3, 2, 1, 0]):
+            shuffled = order_corners(quad[list(permutation)])
+            worst = max(worst, float(np.abs(shuffled - canonical).max()))
+
+    if worst > 1e-4:
+        return [Result("corner ordering", FAIL, f"permuting the input moved a corner by {worst:.3g}")]
+    return [Result("corner ordering", PASS, "canonical under any permutation of 200 random quads")]
+
+
+def check_generator() -> list[Result]:
+    """Generate a handful of samples and audit what comes out."""
+    import numpy as np
+
+    from .geometry import normalize_corners, quad_problem, resize_with_corners
+    from .seed import rng_for
+
+    results: list[Result] = []
+    try:
+        sources, config = _generator_sources("enhance")
+    except FileNotFoundError as exc:
+        return [Result("synthetic generator", WARN, str(exc))]
+    if len(sources.scans) == 0:
+        return [Result("synthetic generator", WARN, "no cached scans to composite")]
+
+    rect_size = tuple(config.data.rect_size)
+    shifts, ratios, problems = [], [], []
+    normalised_range = [1.0, 0.0]
+    resize_drift = 0.0
+
+    for index in range(GENERATOR_SAMPLES):
+        sample = sources.compose(rng_for("sanity", index), keep_clean=True)
+        canvas = sample.canvas_size
+
+        problem = quad_problem(sample.corners, canvas)
+        if problem is not None:
+            problems.append(problem)
+
+        degraded, target = sample.rectify(rect_size)
+        aligned, _ = sample.rectify(rect_size, source=sample.clean_photo)
+        shifts.append(alignment_shift(aligned, target))
+        ratios.append(_detail(degraded) / max(_detail(target), 1e-6))
+
+        # A resize must move the corners with the image: normalised coordinates
+        # are the invariant, so they must come back unchanged.
+        resized, moved = resize_with_corners(sample.photo, sample.corners, (256, 256))
+        before = normalize_corners(sample.corners, canvas)
+        after = normalize_corners(moved, (resized.shape[1], resized.shape[0]))
+        resize_drift = max(resize_drift, float(np.abs(before - after).max()))
+        normalised_range = [
+            min(normalised_range[0], float(after.min())),
+            max(normalised_range[1], float(after.max())),
+        ]
+
+    if problems:
+        results.append(
+            Result("page placement", FAIL, f"{len(problems)} invalid quad(s): {problems[0]}")
+        )
+    else:
+        results.append(
+            Result("page placement", PASS, f"{GENERATOR_SAMPLES} valid quads, ordered and in frame")
+        )
+
+    worst_shift = max(shifts)
+    status = PASS if worst_shift <= MAX_ALIGNMENT_SHIFT_PX else FAIL
+    results.append(
+        Result(
+            "rectification alignment",
+            status,
+            f"input vs target off by {worst_shift:.2f} px at worst "
+            f"(mean {sum(shifts) / len(shifts):.2f}, limit {MAX_ALIGNMENT_SHIFT_PX})",
+        )
+    )
+
+    worst_ratio = min(ratios)
+    status = PASS if worst_ratio >= MIN_DETAIL_RATIO else FAIL
+    results.append(
+        Result(
+            "degradation severity",
+            status,
+            f"{sum(ratios) / len(ratios):.0%} of the target's edge energy survives on average, "
+            f"{worst_ratio:.0%} at worst (floor {MIN_DETAIL_RATIO:.0%})",
+        )
+    )
+
+    low, high = normalised_range
+    status = PASS if 0.0 <= low and high <= 1.0 else FAIL
+    results.append(Result("normalised corners", status, f"in [{low:.3f}, {high:.3f}]"))
+
+    status = PASS if resize_drift <= 1e-3 else FAIL
+    results.append(
+        Result(
+            "resize consistency",
+            status,
+            f"normalised corners moved by {resize_drift:.1e} across a resize to 256x256",
+        )
+    )
+
+    # Same key, same sample — the property the frozen sets and resuming rest on.
+    first = sources.compose(rng_for("sanity", 0)).photo
+    second = sources.compose(rng_for("sanity", 0)).photo
+    other = sources.compose(rng_for("sanity", 1)).photo
+    if not np.array_equal(first, second):
+        results.append(Result("determinism", FAIL, "the same key produced two different photos"))
+    elif np.array_equal(first, other):
+        results.append(Result("determinism", FAIL, "two different keys produced the same photo"))
+    else:
+        results.append(Result("determinism", PASS, "same key same photo, different key different photo"))
+
+    return results
+
+
+def check_dataset_tensors() -> list[Result]:
+    """What a training loop will actually receive."""
+    import numpy as np
+
+    try:
+        from .datasets import SyntheticCornerDataset, SyntheticEnhanceDataset
+    except ImportError as exc:  # pragma: no cover - torch is a hard dependency
+        return [Result("datasets", FAIL, str(exc))]
+
+    try:
+        sources, config = _generator_sources("corner")
+    except FileNotFoundError as exc:
+        return [Result("datasets", WARN, str(exc))]
+
+    data = config.data
+    corner = SyntheticCornerDataset(
+        sources,
+        "train",
+        length=2,
+        input_size=data.corner_input,
+        heatmap_size=data.heatmap_size,
+        heatmap_sigma=data.heatmap_sigma,
+    )
+    item = corner[0]
+    image, corners, heatmaps = item["image"], item["corners"], item["heatmaps"]
+
+    problems = []
+    if tuple(image.shape) != (3, data.corner_input, data.corner_input):
+        problems.append(f"image is {tuple(image.shape)}, expected CHW 3x{data.corner_input}²")
+    if float(image.min()) < 0.0 or float(image.max()) > 1.0:
+        problems.append(f"image is outside [0, 1]: [{image.min():.2f}, {image.max():.2f}]")
+    if tuple(corners.shape) != (4, 2):
+        problems.append(f"corners are {tuple(corners.shape)}, expected (4, 2)")
+    if float(corners.min()) < 0.0 or float(corners.max()) > 1.0:
+        problems.append("corners are not normalised into [0, 1]")
+    if tuple(heatmaps.shape) != (4, data.heatmap_size, data.heatmap_size):
+        problems.append(f"heatmaps are {tuple(heatmaps.shape)}")
+
+    # Every heatmap must peak on its own corner, or approach B is training
+    # against labels that point somewhere else.
+    for index in range(4):
+        peak = np.unravel_index(int(heatmaps[index].argmax()), heatmaps[index].shape)
+        expected = (
+            corners[index, 0].item() * data.heatmap_size - 0.5,
+            corners[index, 1].item() * data.heatmap_size - 0.5,
+        )
+        if abs(peak[1] - expected[0]) > 1.0 or abs(peak[0] - expected[1]) > 1.0:
+            problems.append(f"heatmap {index} peaks at {peak[::-1]}, corner is at {expected}")
+
+    results = [
+        Result("corner dataset", FAIL if problems else PASS, "; ".join(problems) if problems else
+               f"image {tuple(image.shape)}, corners (4, 2) in [0, 1], "
+               f"{data.heatmap_size}² heatmaps peaking on their corners")
+    ]
+
+    enhance = SyntheticEnhanceDataset(
+        sources,
+        "train",
+        length=4,
+        patch_size=data.patch_size,
+        rect_size=tuple(data.rect_size),
+        patches_per_photo=2,
+    )
+    pair = enhance[0]
+    shape = (3, data.patch_size, data.patch_size)
+    if tuple(pair["input"].shape) != shape or tuple(pair["target"].shape) != shape:
+        results.append(
+            Result("enhance dataset", FAIL, f"expected {shape}, got {tuple(pair['input'].shape)}")
+        )
+    else:
+        shared = enhance[1]["scan"] == pair["scan"]
+        results.append(
+            Result(
+                "enhance dataset",
+                PASS,
+                f"{shape} patch pairs, {enhance.patches_per_photo} per composited photo"
+                + ("" if shared else " (WARNING: the photo cache did not hit)"),
+            )
+        )
+    return results
+
+
+def check_frozen_sets() -> list[Result]:
+    """The frozen evaluation sets, and whether they still match their recipe."""
+    from .io import read_json
+    from .seed import rng_for
+    from .synth import build_sources
+
+    results = []
+    for split in ("val", "test"):
+        directory = paths.data / "frozen" / split
+        manifest_path = directory / "manifest.json"
+        if not manifest_path.exists():
+            results.append(
+                Result(
+                    f"frozen {split}",
+                    WARN,
+                    "not built yet — run `python scripts/freeze_eval_sets.py`",
+                )
+            )
+            continue
+
+        manifest = read_json(manifest_path)
+        entries = manifest["samples"]
+        missing = [e["photo"] for e in entries if not (directory / e["photo"]).exists()]
+        if missing:
+            results.append(
+                Result(f"frozen {split}", FAIL, f"{len(missing)} photo(s) missing: {_sample(missing)}")
+            )
+            continue
+
+        # Regenerate a few samples from their keys and compare the encoded bytes.
+        # Byte equality is the strongest form of this check and the cheapest: it
+        # catches a change anywhere in the generator, including one that leaves the
+        # corner labels untouched and only moves the pixels.
+        try:
+            import cv2
+
+            from .config import load_config
+            from .prepare import FROZEN_JPEG_QUALITY
+
+            config = load_config(paths.repo / "configs" / "base.yaml")
+            sources = build_sources(config, split, task="corner")
+            mismatched = []
+            for index in _spread(len(entries), 3):
+                entry = entries[index]
+                rebuilt = sources.compose(rng_for("frozen", split, manifest["seed"], index))
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    cv2.cvtColor(rebuilt.photo, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, FROZEN_JPEG_QUALITY],
+                )
+                if not ok or encoded.tobytes() != (directory / entry["photo"]).read_bytes():
+                    mismatched.append(entry["id"])
+        except Exception as exc:  # noqa: BLE001 - report rather than crash the report
+            results.append(Result(f"frozen {split}", WARN, f"could not verify: {exc}"))
+            continue
+
+        if mismatched:
+            results.append(
+                Result(
+                    f"frozen {split}",
+                    FAIL,
+                    f"{', '.join(mismatched)} no longer regenerate byte-identically — the "
+                    "generator has changed since this set was frozen, so numbers measured on "
+                    "it are not comparable with new ones. Re-freeze it with --force",
+                )
+            )
+        else:
+            results.append(
+                Result(
+                    f"frozen {split}",
+                    PASS,
+                    f"{len(entries)} samples, seed {manifest['seed']}, spot-checked "
+                    "byte-identical on regeneration",
+                )
+            )
+    return results
+
+
+def _spread(count: int, wanted: int) -> list[int]:
+    """A few indices spread across a range, always including the first and the last."""
+    if count <= wanted:
+        return list(range(count))
+    step = (count - 1) / (wanted - 1)
+    return sorted({int(round(index * step)) for index in range(wanted)})
+
+
+def alignment_shift(image, reference) -> float:
+    """Sub-pixel translation between two images, in pixels.
+
+    Phase correlation measures the residual shift between the rectified input and
+    the clean target directly, which is the thing that matters: an *intensity*
+    difference between them is the whole point of the pair, but a *positional*
+    one is a bug.
+
+    ``cv2.phaseCorrelate`` is not exactly unbiased at every image shape — at some
+    sizes it reports half a pixel for an image correlated against itself — so the
+    estimator's own baseline is measured on the reference and subtracted. Without
+    that correction this check reports a constant offset that has nothing to do
+    with the generator.
+    """
+    import cv2
+    import numpy as np
+
+    first = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float64)
+    second = cv2.cvtColor(reference, cv2.COLOR_RGB2GRAY).astype(np.float64)
+    (dx, dy), _ = cv2.phaseCorrelate(first, second)
+    (bias_x, bias_y), _ = cv2.phaseCorrelate(second, second)
+    return float(np.hypot(dx - bias_x, dy - bias_y))
+
+
+def _detail(image) -> float:
+    """Mean Sobel magnitude — how much edge energy an image still carries."""
+    import cv2
+    import numpy as np
+
+    grey = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    gradient_x = cv2.Sobel(grey, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(grey, cv2.CV_32F, 0, 1, ksize=3)
+    return float(np.abs(gradient_x).mean() + np.abs(gradient_y).mean())
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 CHECKS = (
@@ -325,6 +683,10 @@ CHECKS = (
     ("data: real (evaluation only)", check_real_photos),
     ("derived: scan cache", check_scan_cache),
     ("derived: splits", check_splits),
+    ("geometry", check_corner_ordering),
+    ("synthetic generator", check_generator),
+    ("dataset contracts", check_dataset_tensors),
+    ("derived: frozen evaluation sets", check_frozen_sets),
 )
 
 _SYMBOL = {PASS: "✓", WARN: "!", FAIL: "✗"}
