@@ -1,0 +1,78 @@
+{
+  "created": "2026-08-12T19:29:39+03:30",
+  "seed": 1234,
+  "policy": "Split by source scan, never by generated sample: two degraded versions of the same page must never land on opposite sides. Backgrounds are split too, so a surface seen in training does not reappear in validation or test.",
+  "scans": {
+    "train": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "12",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "24",
+      "25",
+      "26",
+      "28",
+      "29",
+      "30",
+      "31",
+      "32",
+      "34",
+      "36",
+      "37",
+      "38",
+      "40",
+      "41",
+      "42",
+      "43",
+      "44",
+      "45",
+      "46",
+      "47",
+      "48",
+      "50"
+    ],
+    "val": [
+      "10",
+      "13",
+      "22",
+      "23",
+      "27"
+    ],
+    "test": [
+      "11",
+      "33",
+      "35",
+      "39",
+      "49"
+    ]
+  },
+  "backgrounds": {
+    "train": [],
+    "heldout": []
+  },
+  "counts": {
+    "scans": {
+      "train": 40,
+      "val": 5,
+      "test": 5
+    },
+    "backgrounds": {
+      "train": 0,
+      "heldout": 0
+    }
+  }
+}
