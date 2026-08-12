@@ -1,4 +1,4 @@
-"""Evaluation metrics.  *(Phases 2 and 4, brief §3.3 and §5)*
+"""Evaluation metrics.  *(brief §3.3 and §5)*
 
 Restoration:
 

@@ -1,4 +1,4 @@
-"""Evaluation.  *(Phases 2-4, brief §3.3 and §5)*
+"""Evaluation.  *(brief §3.3 and §5)*
 
 The brief names this file explicitly. It produces the numbers the report is built
 on:
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 def main(argv: list[str] | None = None) -> int:
     raise SystemExit(
-        "Evaluation arrives in Phase 2, once there is a trained model to evaluate."
+        "Evaluation is not implemented yet — there is no trained model to score."
     )
 
 

@@ -1,4 +1,4 @@
-"""Figures.  *(all phases, brief "Visualization of Results")*
+"""Figures.  *(brief, "Visualization of Results")*
 
 One shared matplotlib style — consistent palette, 200 dpi, readable in print — so
 every figure in the report looks like it came from the same project.

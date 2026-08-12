@@ -65,7 +65,7 @@ train:
   iters_per_epoch: 400      # the generator is infinite, so an "epoch" is a choice
   optimizer: adam
   lr: 2.0e-4
-  weight_decay: 0.0         # no explicit regularisation before the Phase 5 study
+  weight_decay: 0.0         # no explicit regularisation before the dropout study
   scheduler: cosine
   warmup_epochs: 2
   min_lr: 1.0e-6

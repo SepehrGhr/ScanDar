@@ -1,4 +1,4 @@
-"""Inference pipelines for unseen data.  *(Phases 2, 4 and 6; brief §3.4, §5.1, §7)*
+"""Inference pipelines for unseen data.  *(brief §3.4, §5.1 and §7)*
 
 Three entry points, matching the three deliverables:
 

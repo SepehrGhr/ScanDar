@@ -1,4 +1,4 @@
-"""Data preparation: the scan cache and the split manifest.  *(Phase 0)*
+"""Data preparation: the scan cache and the split manifest.
 
 Two jobs, both idempotent and both cheap to re-run:
 

@@ -1,8 +1,8 @@
 """Command line entry point: ``scandar <command>``.
 
-Subcommands are registered as the phases land. Everything that exists today is
-data preparation and verification; training, evaluation and the scanner arrive in
-later phases and currently fail with a message saying so rather than a traceback.
+Everything implemented so far is data preparation and verification; training,
+evaluation and the scanner are not built yet and say so plainly rather than
+failing with a traceback.
 """
 
 from __future__ import annotations
@@ -26,15 +26,15 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("sanity", help="verify the data, the layout and the environment")
     check.add_argument("--strict", action="store_true", help="fail on checks that are only warnings")
 
-    train = sub.add_parser("train", help="train a model from a config (Phase 2)")
+    train = sub.add_parser("train", help="train a model from a config")
     train.add_argument("--config", required=True)
     train.add_argument("--set", nargs="*", default=[], dest="overrides", metavar="key.path=value")
 
-    ev = sub.add_parser("evaluate", help="score a trained model (Phase 2)")
+    ev = sub.add_parser("evaluate", help="score a trained model")
     ev.add_argument("--config", required=True)
     ev.add_argument("--set", nargs="*", default=[], dest="overrides", metavar="key.path=value")
 
-    scan = sub.add_parser("scan", help="photo in, clean scan out (Phase 6, bonus)")
+    scan = sub.add_parser("scan", help="photo in, clean scan out (bonus)")
     scan.add_argument("--input", required=True)
     scan.add_argument("--output", required=True)
 
@@ -67,8 +67,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "scan":
         raise SystemExit(
-            "The end-to-end scanner arrives in Phase 6. Until then, the two stages "
-            "are separate: enhancement (Phase 2) and corner detection (Phase 4)."
+            "The end-to-end scanner is not built yet. Until it is, the two stages "
+            "are separate: document enhancement and corner detection."
         )
 
     raise SystemExit(f"unknown command: {args.command}")

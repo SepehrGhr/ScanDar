@@ -1,4 +1,4 @@
-"""Backgrounds to composite documents onto.  *(Phase 1)*
+"""Backgrounds to composite documents onto.
 
 Two sources, mixed:
 

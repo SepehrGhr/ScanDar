@@ -1,10 +1,10 @@
-"""Network architectures.  *(Phases 2, 4 and 5; brief §3.1 and §5)*
+"""Network architectures.  *(brief §3.1 and §5)*
 
 The brief names this file explicitly, so every architecture lives here.
 
 Designed from scratch — no imported U-Net, no pre-trained weights. The first
 versions carry no dropout and no other explicit regularisation either; that
-arrives, and only as dropout, in Phase 5.
+arrives later, and only as dropout, in the regularisation study.
 
 ``ConvBlock``
     (Conv3x3 -> Norm -> ReLU) x2, the shared building block.

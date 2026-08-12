@@ -1,12 +1,12 @@
-"""Sanity checks.  *(grows with every phase)*
+"""Sanity checks.
 
 A single command that answers "is anything quietly wrong?". Cheap to run, run
 often — most of the expensive mistakes in a project like this are silent ones: a
 corner label that was not rescaled with its image, a validation set that is
 regenerated differently every epoch, a scan that ended up in two splits at once.
 
-Checks come in two severities. An **error** means something is broken and later
-phases will produce nonsense. A **warning** means something is merely absent — the
+Checks come in two severities. An **error** means something is broken and whatever
+runs next will produce nonsense. A **warning** means something is merely absent — the
 background photos, the reference scans, the Roboflow export — which is expected
 while those are still being collected. ``--strict`` promotes warnings to errors.
 

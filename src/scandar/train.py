@@ -1,4 +1,4 @@
-"""Training loop.  *(Phase 2, brief §3.2)*
+"""Training loop.  *(brief §3.2)*
 
 The brief names this file explicitly. One config-driven trainer serves all three
 models — the enhancement network and both corner detectors — because they differ
@@ -12,7 +12,7 @@ Planned behaviour:
   plotted against epochs — the graph the brief asks for, and the one that
   diagnoses overfitting versus underfitting;
 * Adam with **zero weight decay**: the first versions of every model carry no
-  explicit regularisation, so the Phase 5 dropout study isolates dropout alone;
+  explicit regularisation, so the later dropout study isolates dropout alone;
 * checkpoints storing model, optimiser, scaler, epoch *and* RNG state, so a run
   killed by a Colab timeout resumes exactly where it stopped;
 * config, git commit and per-epoch metrics written next to the checkpoint, so
@@ -24,8 +24,7 @@ from __future__ import annotations
 
 def main(argv: list[str] | None = None) -> int:
     raise SystemExit(
-        "Training arrives in Phase 2. Phase 0 has set up the environment, the data "
-        "layout and the config system; the synthetic generator (Phase 1) has to "
+        "The training loop is not implemented yet. The synthetic generator has to "
         "exist before there is anything to train on."
     )
 

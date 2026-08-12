@@ -1,4 +1,4 @@
-"""The degradation pipeline — OpenCV and NumPy only.  *(Phase 1, brief §4)*
+"""The degradation pipeline — OpenCV and NumPy only.  *(brief §4)*
 
 The brief is explicit: no third-party augmentation libraries. Every transform here
 is built from OpenCV primitives and course techniques.

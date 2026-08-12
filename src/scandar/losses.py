@@ -1,4 +1,4 @@
-"""Loss functions, implemented from scratch.  *(Phase 2, brief §3.2)*
+"""Loss functions, implemented from scratch.  *(brief §3.2)*
 
 A plain pixel-wise MSE is known to produce blurry restorations, and blur is
 precisely the enemy when the goal is readable text. The answer this project takes

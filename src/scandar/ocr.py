@@ -1,4 +1,4 @@
-"""OCR-based readability evaluation.  *(Phase 3, brief §3.3)*
+"""OCR-based readability evaluation.  *(brief §3.3)*
 
 The real photos have no clean target — those documents were never scanned — so
 PSNR and SSIM cannot be extended to them. Readability answers the two questions

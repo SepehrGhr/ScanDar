@@ -1,4 +1,4 @@
-"""Homographies, quadrilaterals and corner ordering.  *(Phase 1)*
+"""Homographies, quadrilaterals and corner ordering.
 
 Shared by both mandatory tasks: the synthetic generator picks a destination quad
 and derives the corner labels from it, and the corner detector is scored against

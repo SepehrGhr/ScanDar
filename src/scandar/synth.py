@@ -1,4 +1,4 @@
-"""Synthetic sample generation.  *(Phase 1, brief §1.3 and §4)*
+"""Synthetic sample generation.  *(brief §1.3 and §4)*
 
 The key insight of the project: the training set never needs annotating. Choose
 four random target points in a background image, warp a clean scan onto them, and

@@ -1,4 +1,4 @@
-"""Dataset classes.  *(Phase 1, brief §2)*
+"""Dataset classes.  *(brief §2)*
 
 ``SyntheticEnhanceDataset``
     Composites a fresh sample per ``__getitem__``: 256x256 patches cut from pages
