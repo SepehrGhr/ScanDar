@@ -1,0 +1,36 @@
+# --- data ---------------------------------------------------------------
+# Image blobs stay local; the structure, the annotations and the split manifest
+# are tracked so the repo documents itself. `!data/**/` re-includes directories
+# so git descends into them and the negations below can take effect.
+data/**
+!data/**/
+!data/README.md
+!data/**/.gitkeep
+!data/splits.json
+!data/real/corners.json
+!data/real/annotations/**
+!data/real/transcripts/**
+
+# --- run artefacts ------------------------------------------------------
+outputs/**
+!outputs/.gitkeep
+*.pt
+*.pth
+*.ckpt
+
+# --- python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+env/
+
+# --- editors / os -------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+*.swp
