@@ -1,6 +1,6 @@
-"""Data preparation: the scan cache and the split manifest.
+"""Data preparation: the scan cache, the split manifest and the frozen eval sets.
 
-Two jobs, both idempotent and both cheap to re-run:
+Three jobs, all idempotent and all cheap to re-run:
 
 **Cache the scans.** The originals are ~2480x3512 JPEGs. Re-reading and warping
 those inside every ``__getitem__`` would make the CPU, not the GPU, the thing that
@@ -14,6 +14,11 @@ generated sample, so two degraded versions of the same page can never end up on
 opposite sides. 50 scans become 40 train / 5 validation / 5 test. Background
 photos are split the same way — a surface the model trained on should not reappear
 in validation or test — but by manifest rather than by moving files.
+
+**Freeze the evaluation sets.** The dataset invents a fresh sample per
+``__getitem__``, so an unfrozen validation curve would measure the dice as much as
+the model. Validation and test are generated once from a fixed seed and written to
+disk *(brief §2.3)*.
 """
 
 from __future__ import annotations
@@ -26,6 +31,71 @@ import numpy as np
 from .io import imread_rgb, imwrite_rgb, list_images, natural_key, paths, write_json
 
 BACKGROUND_HELDOUT_FRACTION = 0.25
+
+#: All 40 training scans cached in a worker is roughly 220 MB. That is the right
+#: trade on a 30 GB machine — decoding a 1600 px PNG costs more than everything
+#: else in a sample put together — but it is the first knob to turn on a small one.
+SCAN_CACHE_SIZE = 64
+
+#: Frozen photos are stored as high-quality JPEG rather than PNG. They are already
+#: the output of a quality 30-80 re-encode, so another pass at 96 changes almost
+#: nothing — and four hundred PNGs of degraded photo texture would be well over a
+#: gigabyte on a disk that does not have one to spare.
+FROZEN_JPEG_QUALITY = 96
+
+
+class ScanBank:
+    """The cached clean scans belonging to one side of the split, by id."""
+
+    def __init__(
+        self,
+        ids: list[str] | None = None,
+        directory: Path | str | None = None,
+        cache_size: int = SCAN_CACHE_SIZE,
+    ) -> None:
+        self.directory = Path(directory) if directory is not None else paths.scans_cache
+        if ids is None:
+            ids = [p.stem for p in list_images(self.directory)]
+        self.ids = list(ids)
+        self.cache_size = cache_size
+        self._cache: dict[str, np.ndarray] = {}
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"ScanBank({len(self.ids)} scans from {self.directory})"
+
+    def load(self, scan_id: str) -> np.ndarray:
+        image = self._cache.get(scan_id)
+        if image is None:
+            image = imread_rgb(self.path_for(scan_id))
+            if len(self._cache) < self.cache_size:
+                self._cache[scan_id] = image
+        return image
+
+    def warm(self) -> int:
+        """Decode every scan now. Returns how many are held.
+
+        Worth calling in the parent process *before* a DataLoader forks its
+        workers: decoding a 1600 px PNG costs more than compositing a whole
+        sample, and a forked worker inherits this cache copy-on-write instead of
+        rebuilding it. Without it every worker decodes the split again — and with
+        ``persistent_workers=False``, once per epoch, for the whole run.
+        """
+        for scan_id in self.ids[: self.cache_size]:
+            self.load(scan_id)
+        return len(self._cache)
+
+    def path_for(self, scan_id: str) -> Path:
+        for suffix in (".png", ".jpg", ".jpeg"):
+            candidate = self.directory / f"{scan_id}{suffix}"
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            f"scan {scan_id!r} is not in {self.directory} — "
+            "run `python scripts/prepare_data.py` to build the cache"
+        )
 
 
 def cache_scans(long_side: int = 1600, force: bool = False) -> dict:
@@ -111,6 +181,98 @@ def load_splits() -> dict:
             f"{paths.splits} not found — run `python scripts/prepare_data.py` first."
         )
     return read_json(paths.splits)
+
+
+# ---------------------------------------------------------------------------
+# frozen evaluation sets
+# ---------------------------------------------------------------------------
+def freeze_split(
+    config,
+    split: str,
+    count: int,
+    seed: int = 1234,
+    directory: Path | None = None,
+    force: bool = False,
+) -> dict:
+    """Generate *count* samples for *split* once and write them to disk.
+
+    Only the composited photo is stored; the rectified pair, the heatmaps and
+    everything else are re-derived from it, so the evaluation set and the
+    training pipeline cannot drift apart. What makes that safe is that the
+    generator is a pure function of its key: ``rng_for("frozen", split, seed, i)``
+    produces sample *i* identically on any machine, which the sanity checks
+    verify by regenerating the set and comparing file hashes.
+    """
+    # Deferred so the split and cache commands never pay for importing the
+    # generator, and so this module stays free of an import cycle with it.
+    from .seed import rng_for
+    from .synth import build_sources
+
+    directory = Path(directory) if directory is not None else paths.data / "frozen" / split
+    manifest_path = directory / "manifest.json"
+    if manifest_path.exists() and not force:
+        from .io import read_json
+
+        existing = read_json(manifest_path)
+        if existing.get("count") == count and existing.get("seed") == seed:
+            return existing
+
+    sources = build_sources(config, split, task="corner")
+    if len(sources.scans) == 0:
+        raise FileNotFoundError(f"no cached scans for the {split!r} split")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    for stale in directory.glob("photo_*.jpg"):
+        stale.unlink()
+
+    entries = []
+    for index in range(count):
+        rng = rng_for("frozen", split, seed, index)
+        sample = sources.compose(rng)
+        name = f"photo_{index:04d}.jpg"
+        imwrite_rgb(directory / name, sample.photo, quality=FROZEN_JPEG_QUALITY)
+        entries.append(
+            {
+                "id": f"{split}_{index:04d}",
+                "photo": name,
+                "scan": sample.params["scan"],
+                "corners": np.asarray(sample.corners, dtype=float).round(3).tolist(),
+                "canvas": sample.params["canvas"],
+                "params": sample.params,
+            }
+        )
+
+    manifest = {
+        "split": split,
+        "seed": seed,
+        "count": count,
+        "created": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "note": (
+            "Generated once with a fixed seed so that every epoch, and every model "
+            "compared, is scored on identical images."
+        ),
+        "samples": entries,
+    }
+    write_json(manifest_path, manifest)
+    return manifest
+
+
+def freeze_eval_sets(config, seed: int | None = None, force: bool = False) -> dict:
+    """Freeze both evaluation splits, sized by the config."""
+    data = config.get("data", {})
+    seed = int(data.get("split_seed", 1234)) if seed is None else int(seed)
+    counts = {
+        "val": int(data.get("frozen_val_samples", 200)),
+        "test": int(data.get("frozen_test_samples", 200)),
+    }
+
+    manifests = {}
+    for split, count in counts.items():
+        manifest = freeze_split(config, split, count, seed=seed, force=force)
+        manifests[split] = manifest
+        target = paths.data / "frozen" / split
+        print(f"frozen {split:<5}: {manifest['count']} samples -> {_relative(target)}")
+    return manifests
 
 
 def run(seed: int = 1234, long_side: int = 1600, force: bool = False) -> dict:

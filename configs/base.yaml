@@ -39,20 +39,72 @@ data:
   # does not need resolution the way text restoration does.
   corner_input: 256
 
+  # Heatmap targets for the second corner-detection approach. Sigma is in
+  # heatmap pixels, so it scales with this size, not with the input size.
+  heatmap_size: 128
+  heatmap_sigma: 3.0
+
+  # Patch sampling. A uniformly random crop of an A4 page is very often blank
+  # margin; up to `patch_tries` boxes are drawn and the first with at least this
+  # much contrast wins, which favours text without ever excluding blank paper.
+  patch_tries: 4
+  min_patch_std: 0.045
+
   # Frozen evaluation sets, generated once with a fixed seed and written to disk.
   frozen_val_samples: 200
   frozen_test_samples: 200
 
+# --- placing the page on the background (brief §1.3) ----------------------
+synth:
+  landscape_prob: 0.10          # the phone held sideways, as in one real photo
+  page_scale: [0.42, 0.90]      # page height as a fraction of the canvas height
+  rotation_deg: 30.0            # beyond ~45 deg "top-left" stops being defined
+  keystone: [0.78, 1.00]        # one edge squeezed: photographed from an angle
+  corner_jitter: 0.06           # per-corner nudge, as a fraction of the page
+  center_jitter: 0.06
+  max_tries: 40                 # rejection sampling budget per sample
+
+  feather_sigma: [0.6, 1.6]     # no real camera records a hard one-pixel seam
+  drop_shadow_prob: 0.85
+  drop_shadow_offset: [4.0, 26.0]
+  drop_shadow_sigma: [6.0, 30.0]
+  drop_shadow_strength: [0.10, 0.45]
+
+  procedural_prob: 0.25         # generated textures alongside the real surfaces
+
+  # Corner-detector only: these break the enhancement network's assumption that
+  # the clean scan is what the page should look like, so its options turn them
+  # off. They exist because the real photos include a dark printed card, a
+  # coloured cover, a page resting on other paper and one that will not lie flat.
+  page_tint_prob: 0.25
+  page_dark_prob: 0.10
+  distractor_prob: 0.20
+  curl_prob: 0.20
+
 # --- degradation pipeline (brief §4) --------------------------------------
+# These ranges are the `medium` reference; `severity` stretches all of them at
+# once, which is what keeps the severity study a one-line change.
 degradation:
-  # mild | medium | hard — a guard against degrading the text past recovery
-  severity: medium
-  downscale_range: [2.0, 4.0]
-  jpeg_quality: [30, 80]
-  blur_sigma: [0.4, 2.0]
-  noise_sigma: [0.004, 0.03]
+  severity: medium              # mild | medium | hard
+  downscale: [2.0, 4.0]
+  brightness: [-0.12, 0.12]
+  contrast: [0.82, 1.20]
+  color_gain: [0.88, 1.12]
+  illumination_amplitude: [0.06, 0.30]
+  vignette_prob: 0.5
+  vignette_strength: [0.05, 0.35]
   shadow_count: [0, 3]
   shadow_strength: [0.15, 0.60]
+  shadow_blur: [10.0, 60.0]
+  hard_shadow_prob: 0.20
+  arm_shadow_prob: 0.35         # the photographer's own arm over the page
+  specular_prob: 0.25
+  specular_strength: [0.10, 0.45]
+  blur_sigma: [0.4, 2.0]
+  motion_blur_prob: 0.35
+  motion_length: [3, 15]
+  noise_sigma: [0.004, 0.03]
+  jpeg_quality: [30, 80]
 
 # --- training -------------------------------------------------------------
 train:
