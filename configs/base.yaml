@@ -1,0 +1,80 @@
+# Shared defaults. Every experiment config starts with `_base_: base.yaml` and
+# overrides only what it changes, so the ablations differ by exactly the lines
+# that are supposed to differ.
+#
+# Override any leaf from the command line:
+#   python train.py --config configs/enhance.yaml --set train.lr=3e-4 model.base=48
+
+project:
+  name: scandar
+  seed: 1234
+  deterministic: false      # true costs throughput; use when a number must be bit-reproducible
+
+# --- data ----------------------------------------------------------------
+data:
+  # Split by *source scan*: two degraded versions of the same page must never end
+  # up on opposite sides of a split. 50 scans -> 40 / 5 / 5.
+  split_seed: 1234
+  n_val_scans: 5
+  n_test_scans: 5
+
+  # Cached scans, downscaled once so the generator is not re-reading 2480x3512
+  # JPEGs inside every __getitem__.
+  scan_long_side: 1600
+
+  # The synthetic "photo" canvas the scan gets composited onto. Chosen close to
+  # the real photos (1920x2560) but cheap enough to warp on the fly.
+  canvas: [1152, 1536]      # width, height
+
+  # The rectified page the enhancement network works on. A4 aspect (1:1.414).
+  # Kept high because legibility is the point: at 256x256 a whole page reduces a
+  # pen stroke to under a pixel, and no loss function can bring it back.
+  rect_size: [1024, 1448]   # width, height
+
+  # Training crops. The enhancement net is fully convolutional, so it trains on
+  # patches and infers on whole pages.
+  patch_size: 256
+
+  # The corner detector sees the whole photo, downsized — corner localisation
+  # does not need resolution the way text restoration does.
+  corner_input: 256
+
+  # Frozen evaluation sets, generated once with a fixed seed and written to disk.
+  frozen_val_samples: 200
+  frozen_test_samples: 200
+
+# --- degradation pipeline (brief §4) --------------------------------------
+degradation:
+  # mild | medium | hard — a guard against degrading the text past recovery
+  severity: medium
+  downscale_range: [2.0, 4.0]
+  jpeg_quality: [30, 80]
+  blur_sigma: [0.4, 2.0]
+  noise_sigma: [0.004, 0.03]
+  shadow_count: [0, 3]
+  shadow_strength: [0.15, 0.60]
+
+# --- training -------------------------------------------------------------
+train:
+  device: auto              # auto | cuda | cpu
+  amp: true                 # mixed precision, ignored on CPU
+  num_workers: auto
+  batch_size: 16
+  grad_accum: 1             # keep batch_size * grad_accum constant across machines
+  epochs: 60
+  iters_per_epoch: 400      # the generator is infinite, so an "epoch" is a choice
+  optimizer: adam
+  lr: 2.0e-4
+  weight_decay: 0.0         # no explicit regularisation before the Phase 5 study
+  scheduler: cosine
+  warmup_epochs: 2
+  min_lr: 1.0e-6
+  grad_clip: 1.0
+  max_hours: null           # wall-clock guard so a Colab session stops cleanly
+  resume: auto              # auto | none | <path to checkpoint>
+
+# --- logging --------------------------------------------------------------
+log:
+  every_n_steps: 50
+  save_every_epoch: true
+  keep_best_on: val_loss    # overridden per task, e.g. val_psnr / val_corner_err
