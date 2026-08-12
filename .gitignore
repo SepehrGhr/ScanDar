@@ -29,6 +29,10 @@ dist/
 .venv/
 env/
 
+# --- local working notes ------------------------------------------------
+# Kept out of the published repository on purpose.
+CLAUDE.md
+
 # --- editors / os -------------------------------------------------------
 .vscode/
 .idea/
