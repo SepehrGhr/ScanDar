@@ -29,7 +29,7 @@ Built incrementally; this table is kept honest.
 | Component | State |
 |---|:--|
 | Project layout, configuration, splits and sanity checks | **done** |
-| Synthetic generator and degradation pipeline | in progress |
+| Synthetic generator, degradation pipeline, datasets, frozen evaluation sets | **done** |
 | Enhancement network: architecture, training, loss ablation, evaluation | not started |
 | Real-photo study: OCR readability against a commercial scanning app | not started |
 | Corner detection: coordinate regression vs heatmap regression, head to head | not started |
@@ -46,7 +46,9 @@ conda env create -f environment.yml && conda activate scandar
 pip install -e ".[dev]"
 
 python scripts/prepare_data.py     # cache the scans, write the split manifest
-python scripts/sanity_checks.py    # verify the environment and the data
+python scripts/freeze_eval_sets.py # generate the frozen synthetic val/test sets
+python scripts/preview_synth.py    # render generated samples to look at
+python scripts/sanity_checks.py    # verify the environment, the data and the generator
 pytest                             # unit tests
 ```
 
@@ -58,12 +60,19 @@ Training on Colab instead of locally: run `notebooks/00_colab_bootstrap.ipynb`. 
 ```
 configs/      experiment configs; every run is a file, never an edited constant
 data/         scans, real photos, backgrounds, annotations   (see data/README.md)
+docs/         how each part works, without reading the code   (see docs/README.md)
 src/scandar/  the package
-scripts/      prepare_data · sanity_checks · (more as the work lands)
+scripts/      prepare_data · freeze_eval_sets · preview_synth · sanity_checks · (more to come)
 notebooks/    Colab bootstrap, then one notebook per part of the study
 tests/        unit tests
 reports/      figures, tables and the written report
 ```
+
+[`docs/`](docs/README.md) explains the machinery in prose: the
+[conventions](docs/conventions.md) everything rests on, the
+[synthetic generator](docs/synthetic-generator.md), the
+[degradation pipeline](docs/degradation-pipeline.md), and the
+[datasets and splits](docs/datasets-and-splits.md).
 
 The assignment brief names three files specifically; here is where they are:
 
@@ -89,6 +98,20 @@ evaluation.
 so a naive implementation would score every epoch on different images and the validation curve would
 measure the dice as much as the model. Val and test are generated once from a fixed seed and written
 to disk.
+
+**The page is composited, not pasted.** Its mask is feathered and it casts a soft shadow on the
+surface underneath. Without those, the page meets the background at a perfectly clean one-pixel step
+that no camera produces — and a corner detector will happily learn to find *that* instead of learning
+what a page looks like. For the same reason the scan is resampled down to its size on the canvas with
+an averaging filter before it is warped, rather than letting `warpPerspective` point-sample a
+1600 px scan into a 700 px page and alias the text.
+
+**The two tasks are trained on deliberately different worlds.** The corner detector also sees
+coloured and dark page stock, a second sheet of paper underneath, and pages that will not lie flat —
+all cases the real photos contain. The enhancement network sees none of them, because its target *is*
+the clean scan, and a tinted input paired with a flat white target would ask it to invent a colour
+correction it was never shown how to derive. The code strips those options for the enhancement task
+structurally, so a shared config file cannot switch them on by accident.
 
 **The real photos are never trained on, and never degraded.** They arrive degraded by reality. They
 are the only preview of what the graders will hand the model on presentation day.
