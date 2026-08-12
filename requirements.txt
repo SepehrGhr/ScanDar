@@ -18,8 +18,8 @@ pandas>=2.0
 tqdm>=4.66
 pytest>=8
 
-# --- installed later, per phase (kept here for reference) ---
-# Phase 3 (OCR):   pytesseract>=0.3.10   + the tesseract binary
-#                  conda install -c conda-forge tesseract   (no sudo needed)
-# Phase 6 (bonus): kornia>=0.7
-# Phase 7 (demo):  gradio>=4
+# --- installed later, when the part that needs them is built ---
+# OCR readability study:  pytesseract>=0.3.10   + the tesseract binary
+#                         conda install -c conda-forge tesseract   (no sudo needed)
+# end-to-end scanner:     kornia>=0.7           (differentiable warping)
+# demo app:               gradio>=4

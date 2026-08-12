@@ -36,8 +36,8 @@ dependencies:
       - pytest>=8
       - ipykernel>=6
 
-      # Installed per phase, uncomment when you reach it:
-      # - pytesseract>=0.3.10   # Phase 3; also needs the tesseract binary:
+      # Not needed until the part of the project that uses them; uncomment then:
+      # - pytesseract>=0.3.10   # OCR readability study; needs the tesseract binary:
       #                         #   conda install -c conda-forge tesseract
-      # - kornia>=0.7           # Phase 6 (differentiable warping)
-      # - gradio>=4             # Phase 7 (demo app)
+      # - kornia>=0.7           # differentiable warping, for the end-to-end scanner
+      # - gradio>=4             # the demo app
