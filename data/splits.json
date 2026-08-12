@@ -1,5 +1,5 @@
 {
-  "created": "2026-08-12T19:29:39+03:30",
+  "created": "2026-08-12T21:31:01+03:30",
   "seed": 1234,
   "policy": "Split by source scan, never by generated sample: two degraded versions of the same page must never land on opposite sides. Backgrounds are split too, so a surface seen in training does not reappear in validation or test.",
   "scans": {
@@ -61,8 +61,30 @@
     ]
   },
   "backgrounds": {
-    "train": [],
-    "heldout": []
+    "train": [
+      "carpet-bokhara-red.jpg",
+      "carpet-persian-cream.jpg",
+      "carpet-velvet-leaves.jpg",
+      "cloth-crumpled-white.jpg",
+      "fabric-floral-pink.jpg",
+      "fabric-velvet-rust.jpg",
+      "floor-laminate-grey.jpg",
+      "floor-parquet-inlay.jpg",
+      "leather-grey-scuffed.jpg",
+      "painted-mottled-dark.jpg",
+      "plain-sage-speckled.jpg",
+      "stone-speckled-beige.jpg",
+      "tile-patterned-cream.jpg",
+      "tile-travertine-beige.jpg",
+      "wood-veneer-light.jpg"
+    ],
+    "heldout": [
+      "carpet-persian-paisley.jpg",
+      "fabric-knit-embroidered.jpg",
+      "fabric-suede-pink.jpg",
+      "plain-grey-matte.jpg",
+      "wood-door-brushed.jpg"
+    ]
   },
   "counts": {
     "scans": {
@@ -71,8 +93,8 @@
       "test": 5
     },
     "backgrounds": {
-      "train": 0,
-      "heldout": 0
+      "train": 15,
+      "heldout": 5
     }
   }
 }
