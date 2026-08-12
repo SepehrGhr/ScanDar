@@ -23,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--long-side", type=int, default=1600, help="cached scan long side in px")
     prep.add_argument("--force", action="store_true", help="rebuild the cache from scratch")
 
+    freeze = sub.add_parser("freeze-eval", help="write the frozen synthetic val/test sets")
+    freeze.add_argument("--config", default=None, help="defaults to configs/base.yaml")
+    freeze.add_argument("--set", nargs="*", default=[], dest="overrides", metavar="key.path=value")
+    freeze.add_argument("--seed", type=int, default=None, help="overrides data.split_seed")
+    freeze.add_argument("--force", action="store_true", help="regenerate even if up to date")
+
     check = sub.add_parser("sanity", help="verify the data, the layout and the environment")
     check.add_argument("--strict", action="store_true", help="fail on checks that are only warnings")
 
@@ -48,6 +54,16 @@ def main(argv: list[str] | None = None) -> int:
         from . import prepare
 
         prepare.run(seed=args.seed, long_side=args.long_side, force=args.force)
+        return 0
+
+    if args.command == "freeze-eval":
+        from .config import load_config
+        from .io import paths
+        from .prepare import freeze_eval_sets
+
+        config_path = args.config or paths.repo / "configs" / "base.yaml"
+        config = load_config(config_path, overrides=args.overrides)
+        freeze_eval_sets(config, seed=args.seed, force=args.force)
         return 0
 
     if args.command == "sanity":

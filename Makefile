@@ -1,7 +1,7 @@
 PY ?= python
 
 .DEFAULT_GOAL := help
-.PHONY: help install data sanity test clean-pyc
+.PHONY: help install data freeze preview sanity test clean-pyc
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -13,7 +13,13 @@ install:  ## install the package in editable mode, with dev extras
 data:  ## cache the scans and write data/splits.json
 	$(PY) scripts/prepare_data.py
 
-sanity:  ## verify the environment, the data layout and the splits
+freeze:  ## generate the frozen synthetic validation and test sets
+	$(PY) scripts/freeze_eval_sets.py
+
+preview:  ## render generated samples into outputs/previews for inspection
+	$(PY) scripts/preview_synth.py
+
+sanity:  ## verify the environment, the data, the splits and the generator
 	$(PY) scripts/sanity_checks.py
 
 test:  ## run the unit tests
