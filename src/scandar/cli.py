@@ -1,8 +1,9 @@
 """Command line entry point: ``scandar <command>``.
 
-Data preparation, verification, training, evaluation and enhancement inference
-all work. The end-to-end scanner does not exist yet — it needs the corner
-detector — and says so plainly rather than failing with a traceback.
+Data preparation, verification, training, evaluation and both inference pipelines
+— ``enhance`` for a rectified page, ``detect`` for a raw photo's corners — all
+work. The end-to-end scanner that chains them is the bonus part and does not
+exist yet; it says so plainly rather than failing with a traceback.
 """
 
 from __future__ import annotations
@@ -46,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
     enhance.add_argument("--output", required=True)
     enhance.add_argument("--checkpoint", required=True, help="a best.pt from a training run")
     enhance.add_argument("--max-side", type=int, default=None, help="cap the working resolution")
+
+    detect = sub.add_parser("detect", help="find the four page corners in a raw photo")
+    detect.add_argument("--input", required=True)
+    detect.add_argument("--output", required=True, help="where to write the overlay")
+    detect.add_argument("--checkpoint", required=True, help="a corner detector's best.pt")
+    detect.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="fail loudly on a degenerate quad instead of falling back to Canny",
+    )
 
     scan = sub.add_parser("scan", help="photo in, clean scan out (bonus)")
     scan.add_argument("--input", required=True)
@@ -101,12 +112,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {written}")
         return 0
 
+    if args.command == "detect":
+        from .pipelines import detect_corners_file
+
+        result = detect_corners_file(
+            args.input, args.output, args.checkpoint, fallback=not args.no_fallback
+        )
+        corners = ", ".join(f"({x:.0f}, {y:.0f})" for x, y in result["corners"])
+        print(f"corners via the {result['source']} path: {corners}")
+        if result["problem"]:
+            print(f"  the model's quad was rejected: {result['problem']}")
+        print(f"wrote {result['written']}")
+        return 0
+
     if args.command == "scan":
         raise SystemExit(
-            "The end-to-end scanner is not built yet — it needs the corner detector, "
-            "which is not built either. The enhancement half works today: "
-            "`scandar enhance --input page.jpg --output scan.png --checkpoint <best.pt>` "
-            "takes an already-rectified page."
+            "The end-to-end scanner is not built yet — chaining the two networks is the "
+            "bonus part. Both halves work separately today: `scandar detect` finds the "
+            "corners of a raw photo, and `scandar enhance` restores a page that has "
+            "already been flattened."
         )
 
     raise SystemExit(f"unknown command: {args.command}")
