@@ -294,6 +294,7 @@ Each is a config file that differs from `configs/enhance.yaml` by the lines it i
 | `enhance_no_skips` | Do thin strokes really not survive the bottleneck? |
 | `enhance_residual` | Is predicting the correction better than predicting the image? |
 | `enhance_patch512` | Does a 512 window beat a 256 one, given a 189-pixel receptive field? |
+| `enhance_few_scans` | *(brief §3.2 option)* Many degradations of few scans, or few degradations of many? Same step count, eight source scans instead of forty. |
 
 ### Two things the baseline run revealed about what to try next
 
@@ -308,10 +309,10 @@ per second and the baseline model could consume a hundred, so the GPU idles thro
 Measured end to end: `base=48` costs 7% more wall clock for 2.25x the parameters, and 512-pixel
 patches cost 1.35x rather than the 4x their pixel count implies. On a GPU-bound setup neither would be
 affordable; here they are close to free, which changes which experiments are worth running first.
-| `enhance_few_scans` | *(brief §3.2 option)* Many degradations of few scans, or few degradations of many? Same step count, eight source scans instead of forty. |
 
 ## Not built yet
 
-The two corner detectors and their losses and metrics, the OCR comparison against the commercial
-scanning app, and the end-to-end scanner. The real-photo half of the evaluation also waits on the
-reference scans and the corner annotations, neither of which has been captured yet.
+The OCR comparison against the commercial scanning app, the dropout study, and the end-to-end scanner
+that chains this network to the [corner detector](corner-detection.md). The real-photo half of the
+evaluation also waits on the reference scans and the corner annotations, neither of which has been
+captured yet.

@@ -10,10 +10,10 @@ project: what it is for, how it does its job, and which decisions were deliberat
 | [The degradation pipeline](degradation-pipeline.md) | The nine stages that turn a clean composite into something that looks like a phone photo, built from OpenCV primitives only. |
 | [Datasets, splits and frozen sets](datasets-and-splits.md) | What a training loop actually receives, how the data is split, and why validation and test are written to disk. |
 | [The enhancement network](enhancement-network.md) | The architecture, why it trains on patches, the loss that keeps text sharp, how training and evaluation work, and what the ablations are set up to answer. |
+| [Corner detection](corner-detection.md) | The same problem solved twice — coordinate regression against heatmap regression — the losses and metrics that compare them, and the classical guardrail behind the inference pipeline. |
 
-Not yet built: the two corner detectors and their metrics, the OCR comparison against a commercial
-scanning app, and the end-to-end scanner. The status table in the
-[top-level README](../README.md) is kept honest.
+Not yet built: the OCR comparison against a commercial scanning app, the dropout study, and the
+end-to-end scanner. The status table in the [top-level README](../README.md) is kept honest.
 
 ## The idea in one picture
 
@@ -75,7 +75,7 @@ python scripts/prepare_data.py      # cache the scans, write data/splits.json
 python scripts/freeze_eval_sets.py  # generate the frozen synthetic evaluation sets
 python scripts/preview_synth.py     # render samples into outputs/previews to look at
 python scripts/sanity_checks.py     # verify the environment, the data, the models and the loop
-python train.py    --config configs/enhance.yaml   # train
+python train.py    --config configs/enhance.yaml   # train — or configs/corner_heat.yaml
 python evaluate.py --config configs/enhance.yaml   # score
 ```
 
