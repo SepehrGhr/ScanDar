@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .io import list_images, paths
+from .io import imread_rgb, list_images, paths
 
 EXPECTED_SCANS = 50
 EXPECTED_REAL_PHOTOS = 19
@@ -518,10 +518,21 @@ def check_dataset_tensors() -> list[Result]:
         if abs(peak[1] - expected[0]) > 1.0 or abs(peak[0] - expected[1]) > 1.0:
             problems.append(f"heatmap {index} peaks at {peak[::-1]}, corner is at {expected}")
 
+    # And the extraction must invert the drawing. A soft-argmax that cannot
+    # recover the coordinates its own targets were drawn from would put a floor
+    # under approach B's accuracy that has nothing to do with the model.
+    from .model import soft_argmax2d
+
+    recovered = soft_argmax2d(heatmaps[None])[0]
+    drift = float((recovered - corners).abs().max()) * data.corner_input
+    if drift > 0.5:
+        problems.append(f"soft-argmax misses its own targets by {drift:.2f} px")
+
     results = [
         Result("corner dataset", FAIL if problems else PASS, "; ".join(problems) if problems else
                f"image {tuple(image.shape)}, corners (4, 2) in [0, 1], "
-               f"{data.heatmap_size}² heatmaps peaking on their corners")
+               f"{data.heatmap_size}² heatmaps peaking on their corners, "
+               f"soft-argmax recovers them to {drift:.2f} px")
     ]
 
     enhance = SyntheticEnhanceDataset(
@@ -615,13 +626,29 @@ def check_frozen_sets() -> list[Result]:
             # Byte equality is the strongest form of this check and the cheapest: it
             # catches a change anywhere in the generator, including one that leaves the
             # corner labels untouched and only moves the pixels.
+            #
+            # Against the recipe the set was frozen with, which the manifest records.
+            # These buckets are re-frozen from whichever experiment last changed the
+            # generator, so checking them against a fixed config would report a
+            # failure every time that config was not the one used.
+            config, recipe = _frozen_recipe(manifest)
+            if config is None:
+                results.append(
+                    Result(
+                        label,
+                        WARN,
+                        f"frozen on a {recipe} canvas by a config this set does not record, so "
+                        "it cannot be regenerated for comparison. The next `freeze_eval_sets.py "
+                        "--force` stores the recipe and this becomes checkable again",
+                    )
+                )
+                continue
+
             try:
                 import cv2
 
-                from .config import load_config
                 from .prepare import FROZEN_JPEG_QUALITY
 
-                config = load_config(paths.repo / "configs" / "base.yaml")
                 sources = build_sources(config, split, task=task)
                 mismatched = []
                 for index in _spread(len(entries), 3):
@@ -649,15 +676,43 @@ def check_frozen_sets() -> list[Result]:
                     )
                 )
             else:
+                canvas = entries[0].get("canvas") or ["?", "?"]
                 results.append(
                     Result(
                         label,
                         PASS,
-                        f"{len(entries)} samples, seed {manifest['seed']}, spot-checked "
-                        "byte-identical on regeneration",
+                        f"{len(entries)} samples on a {canvas[0]}x{canvas[1]} canvas, seed "
+                        f"{manifest['seed']}, spot-checked byte-identical against {recipe}",
                     )
                 )
     return results
+
+
+def _frozen_recipe(manifest: dict):
+    """The config a frozen set was generated with, and a name for it.
+
+    Returns ``(None, description)`` when the set predates the manifest recording
+    its own recipe *and* the default config would generate something different —
+    the one case where regenerating for comparison would be measuring the wrong
+    thing and failing loudly about it.
+    """
+    from .config import Config, load_config
+
+    recorded = manifest.get("config")
+    if recorded:
+        path = recorded.get("_config_path")
+        return Config(recorded), Path(path).name if path else "the recorded recipe"
+
+    samples = manifest.get("samples") or [{}]
+    frozen_canvas = [int(v) for v in (samples[0].get("canvas") or [])]
+    config = load_config(paths.repo / "configs" / "base.yaml")
+    default_canvas = [int(v) for v in (config.data.get("canvas") or [])]
+    # The canvas is the cheapest tell that two configs disagree about the
+    # generator, and the one that has actually differed in practice. It cannot
+    # prove they agree, which is why the recipe is recorded now.
+    if frozen_canvas and default_canvas and sorted(frozen_canvas) != sorted(default_canvas):
+        return None, f"{frozen_canvas[0]}x{frozen_canvas[1]}"
+    return config, "configs/base.yaml"
 
 
 def check_models() -> list[Result]:
@@ -700,8 +755,37 @@ def check_models() -> list[Result]:
         )
     )
 
-    # The corner detectors are not built yet; when they are, they are checked
-    # here alongside this one.
+    # The two corner detectors, on the shapes their configs promise. A heatmap
+    # size that disagrees with the model's output stride is the failure worth
+    # catching here: it costs a shape error at the first training step, and the
+    # message it produces names a broadcast rather than the two config keys that
+    # actually disagree.
+    for config_name in ("corner_reg.yaml", "corner_heat.yaml"):
+        detector_config = load_config(paths.repo / "configs" / config_name)
+        detector = build_model(detector_config).eval()
+        size = int(detector_config.data.corner_input)
+        maps = int(detector_config.data.heatmap_size)
+        expected = (
+            (1, 4, 2)
+            if detector.output_kind == "coords"
+            else (1, 4, maps, maps)
+        )
+        with torch.no_grad():
+            out = detector(torch.rand(1, 3, size, size))
+        problem = None
+        if tuple(out.shape) != expected:
+            problem = f"{size}² in gave {tuple(out.shape)}, expected {expected}"
+        elif detector.output_kind == "coords" and (out.min() < 0.0 or out.max() > 1.0):
+            problem = f"coordinates left [0, 1]: [{out.min():.2f}, {out.max():.2f}]"
+        results.append(
+            Result(
+                f"corner model: {config_name.replace('.yaml', '')}",
+                FAIL if problem else PASS,
+                problem
+                or f"{type(detector).__name__}, {count_parameters(detector):,} parameters, "
+                f"{size}² in -> {tuple(out.shape)[1:]} out",
+            )
+        )
 
     # Metric identities. A similarity measure that does not return its maximum
     # for an image against itself is broken in a way no training run reveals.
@@ -764,12 +848,190 @@ def check_training_step() -> list[Result]:
     learned = final < 0.4 * first
     return [
         Result(
-            "overfit one batch",
+            "overfit one batch: enhance",
             PASS if learned else FAIL,
             f"loss {first:.3f} -> {final:.3f} in 150 steps"
             + ("" if learned else " — the loop is not learning"),
         )
     ]
+
+
+def check_corner_training() -> list[Result]:
+    """The same question for each detector: can it memorise two photos?
+
+    Two samples with *different* corners, so passing requires telling them apart
+    rather than learning a constant — a network that outputs the average quad
+    would score respectably on one sample and this catches that. Tiny models on
+    64-pixel inputs, on the CPU, in a couple of seconds.
+    """
+    import numpy as np
+    import torch
+
+    from .datasets import gaussian_heatmaps
+    from .losses import CornerLoss
+    from .metrics import corner_error
+    from .model import CornerHeatNet, CornerRegNet, soft_argmax2d
+
+    rng = np.random.default_rng(0)
+    images = torch.from_numpy(rng.random((2, 3, 64, 64), dtype=np.float32))
+    targets = torch.tensor(
+        [
+            [[0.15, 0.20], [0.80, 0.12], [0.88, 0.85], [0.10, 0.90]],
+            [[0.30, 0.35], [0.70, 0.30], [0.75, 0.70], [0.25, 0.65]],
+        ]
+    )
+    heatmaps = torch.from_numpy(
+        np.stack([gaussian_heatmaps(t.numpy(), (32, 32), 2.0) for t in targets])
+    )
+
+    results = []
+    cases = (
+        ("coords", CornerRegNet(base=8, stages=3, grid=4, hidden=64), CornerLoss(coord_l1=1.0)),
+        ("heatmaps", CornerHeatNet(base=8, depth=2), CornerLoss(heatmap=1.0)),
+    )
+    for kind, model, criterion in cases:
+        torch.manual_seed(0)
+        optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
+        labels = targets if kind == "coords" else {"corners": targets, "heatmaps": heatmaps}
+        first = None
+        for _ in range(200):
+            loss, _ = criterion(model(images), labels)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            first = float(loss) if first is None else first
+
+        model.eval()
+        with torch.no_grad():
+            output = model(images)
+        predicted = output if kind == "coords" else soft_argmax2d(output)
+        error = float(corner_error(predicted, targets, size=64))
+        # Four pixels of 64 is 6% of the frame — a loose bar on purpose. This is
+        # asking whether the plumbing works, not how good the model is.
+        learned = error < 4.0 and float(loss) < 0.4 * first
+        name = "corner_reg" if kind == "coords" else "corner_heat"
+        results.append(
+            Result(
+                f"overfit one batch: {name}",
+                PASS if learned else FAIL,
+                f"loss {first:.4f} -> {float(loss):.4f} in 200 steps, memorised to "
+                f"{error:.2f} px of 64" + ("" if learned else " — the loop is not learning"),
+            )
+        )
+    return results
+
+
+#: How far the classical detector may sit from the true corners and still count
+#: as having found the page. Generous — it is a guardrail, not a contender, and
+#: the number that matters is whether it lands on the page at all.
+CLASSICAL_TOLERANCE_PCT = 5.0
+
+#: How often it has to find one. Deliberately not "always": the classical path
+#: legitimately fails on a busy surface or a page running out of frame, and that
+#: is the *reason* it is a fallback rather than the detector. What this catches is
+#: the fallback going broadly blind, not one hard photo out of six.
+CLASSICAL_MIN_HIT_RATE = 0.5
+
+PIPELINE_SAMPLES = 6
+
+
+def check_corner_pipeline() -> list[Result]:
+    """The §5.1 pipeline, end to end, on real frozen photos.
+
+    Two separate questions. **Does the pipeline hold together** — a photo in,
+    four ordered corners out, at the photo's own resolution, without a crash on
+    any of them? And **does the fallback actually work**, measured on its own,
+    because the day it is needed is the day nothing else is working and there
+    will be no opportunity to find out then.
+
+    Run against an *untrained* detector on purpose. Whether a trained model is
+    accurate is `evaluate.py`'s question; whether the plumbing around it is sound
+    should be answerable before any model exists.
+    """
+    import numpy as np
+    import torch
+
+    from .config import load_config
+    from .geometry import corner_errors, order_corners, quad_problem
+    from .io import read_json
+    from .model import build_model
+    from .pipelines import classical_corners, detect_corners, draw_corners
+
+    directory = paths.frozen_set("corner", "val")
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.exists():
+        return [Result("corner pipeline", WARN, "no frozen corner samples to run it on")]
+
+    entries = read_json(manifest_path)["samples"]
+    indices = _spread(len(entries), PIPELINE_SAMPLES)
+    config = load_config(paths.repo / "configs" / "corner_heat.yaml")
+    model = build_model(config).eval()
+    input_size = int(config.data.corner_input)
+
+    sources: dict[str, int] = {}
+    problems: list[str] = []
+    classical_errors: list[float] = []
+    found = 0
+
+    for index in indices:
+        entry = entries[index]
+        photo = imread_rgb(directory / entry["photo"])
+        truth = np.asarray(entry["corners"], dtype=np.float32)
+        height, width = photo.shape[:2]
+
+        with torch.no_grad():
+            result = detect_corners(photo, model, input_size=input_size)
+        sources[result["source"]] = sources.get(result["source"], 0) + 1
+
+        quad = result["corners"]
+        if quad.shape != (4, 2):
+            problems.append(f"{entry['id']} returned {quad.shape}")
+        elif not np.allclose(quad, order_corners(quad), atol=1e-3):
+            problems.append(f"{entry['id']} came back out of canonical order")
+        elif quad_problem(quad, (width, height), margin=-24.0, area_fraction=(0.01, 1.0)):
+            problems.append(f"{entry['id']}: {quad_problem(quad, (width, height), margin=-24.0)}")
+
+        # The overlay is part of the pipeline the brief asks for, so it is part of
+        # what gets smoke-tested.
+        overlay = draw_corners(photo, quad)
+        if overlay.shape != photo.shape:
+            problems.append(f"{entry['id']} overlay changed the photo's shape")
+
+        guess = classical_corners(photo)
+        if guess is not None:
+            found += 1
+            diagonal = float(np.hypot(width, height))
+            classical_errors.append(100.0 * float(corner_errors(guess, truth).mean()) / diagonal)
+
+    results = [
+        Result(
+            "corner pipeline",
+            FAIL if problems else PASS,
+            "; ".join(problems)
+            if problems
+            else f"{len(indices)} photos, ordered valid quads at full resolution, "
+            f"paths taken: {', '.join(f'{k} x{v}' for k, v in sorted(sources.items()))}",
+        )
+    ]
+
+    if not classical_errors:
+        results.append(
+            Result("classical fallback", WARN, f"found no page in any of {len(indices)} photos")
+        )
+    else:
+        worst = max(classical_errors)
+        rate = found / len(indices)
+        status = PASS if rate >= CLASSICAL_MIN_HIT_RATE and worst <= CLASSICAL_TOLERANCE_PCT else WARN
+        results.append(
+            Result(
+                "classical fallback",
+                status,
+                f"found the page in {found}/{len(indices)}, mean corner error "
+                f"{sum(classical_errors) / len(classical_errors):.2f}% of the diagonal "
+                f"({worst:.2f}% at worst, tolerance {CLASSICAL_TOLERANCE_PCT:.0f}%)",
+            )
+        )
+    return results
 
 
 def _spread(count: int, wanted: int) -> list[int]:
@@ -832,6 +1094,8 @@ CHECKS = (
     ("derived: frozen evaluation sets", check_frozen_sets),
     ("models and metrics", check_models),
     ("training loop", check_training_step),
+    ("training loop: corner detectors", check_corner_training),
+    ("inference: corner pipeline", check_corner_pipeline),
 )
 
 _SYMBOL = {PASS: "✓", WARN: "!", FAIL: "✗"}

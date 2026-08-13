@@ -271,6 +271,15 @@ def freeze_split(
             "Generated once with a fixed seed so that every epoch, and every model "
             "compared, is scored on identical images."
         ),
+        # The recipe, stored alongside the result. A frozen set is only
+        # reproducible from the config that produced it, and that is not
+        # necessarily the default one: these buckets get re-frozen whenever the
+        # generator changes, from whichever experiment motivated the change. With
+        # the recipe recorded, the sanity check can regenerate a sample and
+        # compare the bytes against what the set was *actually* frozen with,
+        # instead of assuming a config and reporting a false alarm when the
+        # assumption is wrong.
+        "config": config.to_dict() if hasattr(config, "to_dict") else dict(config),
         "samples": entries,
     }
     write_json(manifest_path, manifest)
