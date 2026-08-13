@@ -182,11 +182,12 @@ def test_freezing_is_reproducible_and_readable(tmp_path, sources, monkeypatch):
     monkeypatch.setattr(synth_module, "build_sources", lambda *a, **k: sources)
     config = {"data": {"canvas": list(CANVAS)}}
 
-    directory = tmp_path / "frozen" / "val"
-    first = freeze_split(config, "val", count=3, seed=7, directory=directory, force=True)
+    directory = tmp_path / "frozen" / "enhance" / "val"
+    kwargs = dict(seed=7, directory=directory, task="enhance")
+    first = freeze_split(config, "val", count=3, force=True, **kwargs)
     bytes_first = [(directory / e["photo"]).read_bytes() for e in first["samples"]]
 
-    second = freeze_split(config, "val", count=3, seed=7, directory=directory, force=True)
+    second = freeze_split(config, "val", count=3, force=True, **kwargs)
     bytes_second = [(directory / e["photo"]).read_bytes() for e in second["samples"]]
     assert bytes_first == bytes_second
     assert [e["corners"] for e in first["samples"]] == [e["corners"] for e in second["samples"]]
@@ -199,11 +200,56 @@ def test_freezing_is_reproducible_and_readable(tmp_path, sources, monkeypatch):
     assert item["input"].shape == (3, RECT[1], RECT[0])
     assert item["id"] == "val_0000"
 
+    corner_directory = tmp_path / "frozen" / "corner" / "val"
+    freeze_split(config, "val", count=3, seed=7, directory=corner_directory, task="corner")
     corners = FrozenSyntheticDataset(
-        directory, task="corner", scans=sources.scans, input_size=64, heatmap_size=32
+        corner_directory, task="corner", scans=sources.scans, input_size=64, heatmap_size=32
     )[0]
     assert corners["image"].shape == (3, 64, 64)
     assert 0.0 <= float(corners["corners"].min()) and float(corners["corners"].max()) <= 1.0
+
+
+def test_a_frozen_set_refuses_to_serve_the_other_task(tmp_path, sources, monkeypatch):
+    """The corner task's photos carry tinted stock and curl; the enhancement
+    target is the flat clean scan, so scoring one on the other's samples asks the
+    model to undo something it was never shown. The mismatch is refused rather
+    than quietly measured."""
+    import scandar.synth as synth_module
+
+    monkeypatch.setattr(synth_module, "build_sources", lambda *a, **k: sources)
+    directory = tmp_path / "frozen" / "corner" / "val"
+    freeze_split({"data": {"canvas": list(CANVAS)}}, "val", count=2, seed=7,
+                 directory=directory, task="corner")
+
+    with pytest.raises(ValueError, match="separate frozen sets"):
+        FrozenSyntheticDataset(directory, task="enhance", scans=sources.scans)
+
+
+def test_frozen_patches_are_frozen(tmp_path, sources, monkeypatch):
+    """The per-epoch validation curve is patch-level, so the patches themselves
+    have to be as fixed as the pages are."""
+    import scandar.synth as synth_module
+
+    monkeypatch.setattr(synth_module, "build_sources", lambda *a, **k: sources)
+    directory = tmp_path / "frozen" / "enhance" / "val"
+    freeze_split({"data": {"canvas": list(CANVAS)}}, "val", count=2, seed=7,
+                 directory=directory, task="enhance")
+
+    def build():
+        return FrozenSyntheticDataset(
+            directory, task="enhance", scans=sources.scans, rect_size=RECT,
+            mode="patch", patch_size=PATCH, patches_per_page=3,
+        )
+
+    first, second = build(), build()
+    assert len(first) == 6  # two pages, three patches each
+    assert first[0]["input"].shape == (3, PATCH, PATCH)
+    for index in range(len(first)):
+        assert torch.equal(first[index]["input"], second[index]["input"])
+        assert torch.equal(first[index]["target"], second[index]["target"])
+    # Different patches of the same page, not the same patch three times.
+    boxes = {tuple(first[i]["box"].tolist()) for i in range(3)}
+    assert len(boxes) > 1
 
 
 def test_freezing_is_idempotent(tmp_path, sources, monkeypatch):

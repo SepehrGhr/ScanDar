@@ -105,11 +105,35 @@ If the generator changes, that check fails loudly — which is the point: number
 frozen set are not comparable with numbers from a new one.
 
 ```
-data/frozen/val/
+data/frozen/<task>/<split>/
 ├── manifest.json
 ├── photo_0000.jpg
 └── ...
 ```
+
+**One set per task, and this is not tidiness.** The corner detector is deliberately trained on a
+harder world than the enhancement network: coloured page stock, a dark printed card, a second sheet
+of paper peeking out from underneath, a page that will not lie flat. The enhancement network must
+never see any of those, because its *target* is the flat clean scan — pair a tinted input with an
+untinted target and you are asking the model to invert a colour cast it was never shown how to
+derive, and to unbend a curl the rectification does not undo.
+
+The first version of the frozen sets was generated once, with the corner options on, and used for
+both tasks. About 40% of the enhancement validation samples were unmatched pairs, and the effect was
+already visible in the do-nothing baseline: 15.0 dB on plain pages against 14.3 dB on tinted or
+curled ones. On a *trained* model the gap would have been far larger, because the model can improve a
+plain page and can do nothing at all about a tint. The sanity checks now refuse an enhancement set
+containing either.
+
+There is a frozen **train** bucket too. That sounds odd until you notice that the generator never
+produces the same sample twice, so there is no set of files the model was trained on: "performance on
+the training set" can only mean performance on the training *distribution* — the training scans and
+the training backgrounds — and a fixed draw from it is exactly what measures that *(brief §3.3)*.
+
+For the enhancement task the frozen pages serve two purposes. `mode="page"` gives whole rectified
+pages at 1024 × 1448 for the results table; `mode="patch"` cuts deterministic crops for the per-epoch
+validation curve, so that the training and validation curves on the brief's graph are the same
+quantity rather than two different ones sharing an axis.
 
 ## Reproducibility
 
@@ -132,8 +156,18 @@ is what makes the one-entry cache hit. Set it to 1 for one photo per patch, at f
 dataloader workers inherit them copy-on-write instead of each rebuilding the cache — worth calling
 before handing the dataset to a DataLoader, especially without `persistent_workers`.
 
-Measured on the development machine (16 cores): the generator parallelises across processes to about
-24 photos per second, saturating around six — it is memory-bound, so past that each process slows in
-proportion and the total stops rising. Through a PyTorch `DataLoader` it currently does not
-parallelise at all, holding at roughly 28 samples per second regardless of worker count; that is an
-open problem to solve alongside the training loop, and it sets the budget until then.
+Measured on the development machine (16 cores), at batch 16, through the real training loop:
+
+| | samples/s |
+|---|---|
+| data loader alone, no workers | 31 |
+| data loader alone, 8 workers | 84 |
+| the model's forward and backward alone, mixed precision | ~83 |
+| the model's forward and backward alone, fp32 | ~26 |
+| **loader and model together, 8 workers** | **~34** |
+
+The loader does parallelise — an earlier measurement taken before there was a training loop to
+profile suggested otherwise, and does not reproduce against one. What is left is two stages of
+roughly equal cost competing for the same cores, which is why the combined figure is well under
+either one alone. Mixed precision is not optional: it is a threefold difference in the model step by
+itself. At ~34 samples per second, 24 000 steps at batch 16 is a little over three hours.

@@ -87,12 +87,20 @@ class Paths:
 
     # --- frozen evaluation sets and manifests ----------------------------
     @property
-    def frozen_val(self) -> Path:
-        return self.data / "frozen" / "val"
+    def frozen(self) -> Path:
+        return self.data / "frozen"
 
-    @property
-    def frozen_test(self) -> Path:
-        return self.data / "frozen" / "test"
+    def frozen_set(self, task: str, split: str) -> Path:
+        """One frozen evaluation bucket.
+
+        Frozen sets are stored **per task**, not shared. The corner detector is
+        trained against coloured page stock, a second sheet of paper in the frame
+        and pages that will not lie flat; the enhancement network must never see
+        any of those, because its target is the flat clean scan and no model can
+        invert a tint it was never shown. One shared set of composited photos
+        cannot serve both, so there are two.
+        """
+        return self.frozen / task / split
 
     @property
     def splits(self) -> Path:

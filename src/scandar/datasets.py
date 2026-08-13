@@ -8,9 +8,11 @@
     The raw synthetic photo plus its corner labels, both as normalised coordinates
     and as four Gaussian heatmaps, so approaches A and B train off one dataset.
 ``FrozenSyntheticDataset``
-    Reads the validation and test samples that were generated once with a fixed
-    seed. Freezing them is what makes the validation curve measure the model
-    instead of the dice.
+    Reads the train, validation and test samples that were generated once with a
+    fixed seed. Freezing them is what makes the validation curve measure the model
+    instead of the dice. For the enhancement task it serves whole rectified pages
+    for the evaluation table and deterministic patches for the per-epoch
+    validation curve.
 
 Corners are normalised to [0, 1] by image width and height, which makes the
 detection task resolution-independent, and are *always* rescaled together with
@@ -285,7 +287,7 @@ def corner_item(
 # the frozen evaluation sets
 # ---------------------------------------------------------------------------
 class FrozenSyntheticDataset(Dataset):
-    """Validation and test samples generated once and written to disk.
+    """Evaluation samples generated once with a fixed seed and written to disk.
 
     Only the composited photo is stored. Everything else — the rectified input,
     the clean target, the heatmaps — is *derived* from it with the recorded
@@ -293,6 +295,22 @@ class FrozenSyntheticDataset(Dataset):
     That keeps the frozen set to one file per sample, and it guarantees that the
     evaluation path and the training path cannot drift apart, because they are
     the same code.
+
+    Frozen sets live under ``data/frozen/<task>/<split>/`` and are **generated per
+    task**. The corner detector's samples deliberately include tinted page stock,
+    a distractor sheet and pages that will not lie flat; scoring the enhancement
+    network on those would ask it to invert a colour cast and unbend a page it was
+    never trained to, and would put a hard ceiling on its measured PSNR that has
+    nothing to do with how well it restores a document.
+
+    ``mode`` applies to the enhancement task. ``"page"`` returns the whole
+    rectified page, which is what the report's table is computed on. ``"patch"``
+    cuts ``patches_per_page`` deterministic crops out of each page, which is what
+    the per-epoch validation curve uses — the training loss is a patch loss, and
+    plotting it against a full-page validation loss would be comparing two
+    different quantities on one axis *(brief §3.2)*. The crop positions come from
+    :func:`~scandar.seed.rng_for` keyed on the sample's own id, so they are as
+    frozen as the photos are.
     """
 
     def __init__(
@@ -305,6 +323,11 @@ class FrozenSyntheticDataset(Dataset):
         input_size: int = 256,
         heatmap_size: int = 128,
         heatmap_sigma: float = 3.0,
+        mode: str = "page",
+        patch_size: int = 256,
+        patches_per_page: int = 2,
+        patch_tries: int = 4,
+        min_patch_std: float = 0.045,
     ) -> None:
         self.directory = Path(directory)
         manifest_path = self.directory / "manifest.json"
@@ -313,6 +336,14 @@ class FrozenSyntheticDataset(Dataset):
                 f"{manifest_path} not found — run `python scripts/freeze_eval_sets.py` first"
             )
         manifest = read_json(manifest_path)
+        if manifest.get("task", "corner") != task:
+            raise ValueError(
+                f"{manifest_path} holds {manifest.get('task', 'corner')!r} samples, "
+                f"not {task!r} — the two tasks have separate frozen sets"
+            )
+        if mode not in ("page", "patch"):
+            raise ValueError(f"mode must be 'page' or 'patch', not {mode!r}")
+
         self.entries = manifest["samples"]
         self.manifest = manifest
         self.task = task
@@ -321,36 +352,64 @@ class FrozenSyntheticDataset(Dataset):
         self.input_size = int(input_size)
         self.heatmap_size = int(heatmap_size)
         self.heatmap_sigma = float(heatmap_sigma)
+        self.mode = mode
+        self.patch_size = int(patch_size)
+        self.patches_per_page = max(1, int(patches_per_page)) if mode == "patch" else 1
+        self.patch_tries = int(patch_tries)
+        self.min_patch_std = float(min_patch_std)
+        self._cached: tuple[int, Sample] | None = None
 
     def __len__(self) -> int:
-        return len(self.entries)
+        return len(self.entries) * self.patches_per_page
 
     def sample_at(self, index: int) -> Sample:
-        """Rebuild the :class:`~scandar.synth.Sample` behind entry *index*."""
+        """Rebuild the :class:`~scandar.synth.Sample` behind entry *index*.
+
+        The last page decoded is kept, because in patch mode consecutive indices
+        ask for different crops of the same one and re-reading the JPEG each time
+        would dominate the cost of validating.
+        """
+        if self._cached is not None and self._cached[0] == index:
+            return self._cached[1]
+
         entry = self.entries[index]
         photo = imread_rgb(self.directory / entry["photo"])
         scan = self.scans.load(entry["scan"])
         corners = np.asarray(entry["corners"], dtype=np.float32)
         scan_height, scan_width = scan.shape[:2]
-        return Sample(
+        sample = Sample(
             photo=photo,
             corners=corners,
             scan=scan,
             H=homography(rect_corners(scan_width, scan_height), corners),
             params={"scan": entry["scan"], "id": entry["id"]},
         )
+        self._cached = (index, sample)
+        return sample
 
     def __getitem__(self, index: int) -> dict:
-        sample = self.sample_at(index)
-        entry = self.entries[index]
+        entry_index, patch_index = divmod(index, self.patches_per_page)
+        sample = self.sample_at(entry_index)
+        entry = self.entries[entry_index]
 
         if self.task == "enhance":
-            degraded, target = sample.rectify(self.rect_size)
+            if self.mode == "patch":
+                degraded, target, box = sample.random_patch(
+                    rng_for("frozen-patch", entry["id"], patch_index),
+                    self.patch_size,
+                    self.rect_size,
+                    tries=self.patch_tries,
+                    min_std=self.min_patch_std,
+                )
+            else:
+                degraded, target = sample.rectify(self.rect_size)
+                box = (0, 0, 0)
             return {
                 "input": to_tensor(degraded),
                 "target": to_tensor(target),
                 "scan": entry["scan"],
                 "id": entry["id"],
+                "box": torch.tensor(box, dtype=torch.int32),
                 "index": index,
             }
 
@@ -362,3 +421,35 @@ class FrozenSyntheticDataset(Dataset):
             heatmap_sigma=self.heatmap_sigma,
             extra={"scan": entry["scan"], "id": entry["id"], "index": index},
         )
+
+
+def frozen_dataset(
+    config,
+    split: str,
+    task: str = "enhance",
+    mode: str = "page",
+    scans: ScanBank | None = None,
+) -> FrozenSyntheticDataset:
+    """The frozen bucket for *task*/*split*, sized by the config.
+
+    One place decides how a config becomes an evaluation set, so the trainer's
+    validation set and the evaluator's test set cannot be built two subtly
+    different ways.
+    """
+    from .io import paths
+
+    data = config.get("data", {})
+    return FrozenSyntheticDataset(
+        paths.frozen_set(task, split),
+        task=task,
+        scans=scans,
+        rect_size=tuple(data.get("rect_size", (1024, 1448))),
+        input_size=int(data.get("corner_input", 256)),
+        heatmap_size=int(data.get("heatmap_size", 128)),
+        heatmap_sigma=float(data.get("heatmap_sigma", 3.0)),
+        mode=mode,
+        patch_size=int(data.get("patch_size", 256)),
+        patches_per_page=int(data.get("frozen_patches_per_page", 2)),
+        patch_tries=int(data.get("patch_tries", 4)),
+        min_patch_std=float(data.get("min_patch_std", 0.045)),
+    )

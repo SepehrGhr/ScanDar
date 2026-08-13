@@ -18,7 +18,16 @@ in validation or test — but by manifest rather than by moving files.
 **Freeze the evaluation sets.** The dataset invents a fresh sample per
 ``__getitem__``, so an unfrozen validation curve would measure the dice as much as
 the model. Validation and test are generated once from a fixed seed and written to
-disk *(brief §2.3)*.
+disk *(brief §2.3)*. There is a frozen *training* bucket too, which sounds odd
+until you notice that with an infinite generator the model never sees the same
+sample twice: "performance on the training set" can only mean performance on the
+training *distribution* — the training scans and the training backgrounds — and
+that is exactly what a fixed set of samples drawn from it measures.
+
+Frozen sets are stored per task, under ``data/frozen/<task>/<split>/``. The two
+tasks are deliberately generated from different worlds — the corner detector sees
+tinted stock, distractor sheets and curled pages, the enhancement network must
+not — so one shared set of photos cannot score both.
 """
 
 from __future__ import annotations
@@ -193,8 +202,9 @@ def freeze_split(
     seed: int = 1234,
     directory: Path | None = None,
     force: bool = False,
+    task: str = "corner",
 ) -> dict:
-    """Generate *count* samples for *split* once and write them to disk.
+    """Generate *count* samples of *task* for *split* once and write them to disk.
 
     Only the composited photo is stored; the rectified pair, the heatmaps and
     everything else are re-derived from it, so the evaluation set and the
@@ -202,22 +212,31 @@ def freeze_split(
     generator is a pure function of its key: ``rng_for("frozen", split, seed, i)``
     produces sample *i* identically on any machine, which the sanity checks
     verify by regenerating the set and comparing file hashes.
+
+    *task* selects which generator options are in force, and it is part of the
+    rng key: the two tasks must not be handed the same photos, because the corner
+    options change what a page looks like in ways the enhancement target cannot
+    account for.
     """
     # Deferred so the split and cache commands never pay for importing the
     # generator, and so this module stays free of an import cycle with it.
     from .seed import rng_for
     from .synth import build_sources
 
-    directory = Path(directory) if directory is not None else paths.data / "frozen" / split
+    directory = Path(directory) if directory is not None else paths.frozen_set(task, split)
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() and not force:
         from .io import read_json
 
         existing = read_json(manifest_path)
-        if existing.get("count") == count and existing.get("seed") == seed:
+        if (
+            existing.get("count") == count
+            and existing.get("seed") == seed
+            and existing.get("task", "corner") == task
+        ):
             return existing
 
-    sources = build_sources(config, split, task="corner")
+    sources = build_sources(config, split, task=task)
     if len(sources.scans) == 0:
         raise FileNotFoundError(f"no cached scans for the {split!r} split")
 
@@ -243,6 +262,7 @@ def freeze_split(
         )
 
     manifest = {
+        "task": task,
         "split": split,
         "seed": seed,
         "count": count,
@@ -257,21 +277,37 @@ def freeze_split(
     return manifest
 
 
-def freeze_eval_sets(config, seed: int | None = None, force: bool = False) -> dict:
-    """Freeze both evaluation splits, sized by the config."""
+def freeze_eval_sets(
+    config,
+    seed: int | None = None,
+    force: bool = False,
+    tasks: list[str] | None = None,
+) -> dict:
+    """Freeze every bucket the config asks for, one set per task.
+
+    The training bucket is frozen too. It is not the data the model trained on —
+    with a generator that never repeats itself, no such data exists — but a fixed
+    sample of the distribution it trained on, which is the only thing the brief's
+    "Training" row can honestly mean *(brief §3.3)*.
+    """
     data = config.get("data", {})
     seed = int(data.get("split_seed", 1234)) if seed is None else int(seed)
+    tasks = list(tasks or data.get("frozen_tasks") or ["enhance", "corner"])
     counts = {
+        "train": int(data.get("frozen_train_samples", 200)),
         "val": int(data.get("frozen_val_samples", 200)),
         "test": int(data.get("frozen_test_samples", 200)),
     }
 
-    manifests = {}
-    for split, count in counts.items():
-        manifest = freeze_split(config, split, count, seed=seed, force=force)
-        manifests[split] = manifest
-        target = paths.data / "frozen" / split
-        print(f"frozen {split:<5}: {manifest['count']} samples -> {_relative(target)}")
+    manifests: dict[str, dict] = {}
+    for task in tasks:
+        for split, count in counts.items():
+            if count <= 0:
+                continue
+            manifest = freeze_split(config, split, count, seed=seed, force=force, task=task)
+            manifests[f"{task}/{split}"] = manifest
+            target = paths.frozen_set(task, split)
+            print(f"frozen {task:<8} {split:<5}: {manifest['count']} samples -> {_relative(target)}")
     return manifests
 
 
