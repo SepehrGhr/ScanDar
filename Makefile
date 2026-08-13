@@ -1,7 +1,9 @@
 PY ?= python
 
 .DEFAULT_GOAL := help
-.PHONY: help install data freeze preview sanity test clean-pyc
+.PHONY: help install data freeze preview sanity test train evaluate clean-pyc
+
+CONFIG ?= configs/enhance.yaml
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -13,7 +15,7 @@ install:  ## install the package in editable mode, with dev extras
 data:  ## cache the scans and write data/splits.json
 	$(PY) scripts/prepare_data.py
 
-freeze:  ## generate the frozen synthetic validation and test sets
+freeze:  ## generate the frozen synthetic evaluation sets, one per task
 	$(PY) scripts/freeze_eval_sets.py
 
 preview:  ## render generated samples into outputs/previews for inspection
@@ -24,6 +26,12 @@ sanity:  ## verify the environment, the data, the splits and the generator
 
 test:  ## run the unit tests
 	$(PY) -m pytest
+
+train:  ## train a model   (make train CONFIG=configs/enhance_residual.yaml)
+	$(PY) train.py --config $(CONFIG)
+
+evaluate:  ## score a trained model on the frozen synthetic buckets
+	$(PY) evaluate.py --config $(CONFIG)
 
 clean-pyc:  ## remove __pycache__ and stray bytecode
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} + ; \
