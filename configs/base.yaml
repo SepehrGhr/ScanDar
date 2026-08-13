@@ -35,6 +35,17 @@ data:
   # patches and infers on whole pages.
   patch_size: 256
 
+  # How many patches are cut from one composited photo. Compositing costs ~140 ms
+  # and a patch costs ~2, so this is worth four times the throughput; the loader
+  # must not shuffle for it to work. Raising it further trades sample diversity
+  # within a batch for speed — at 16, a batch of 16 would be one photo.
+  patches_per_photo: 4
+
+  # The brief's §3.2 option: many degradations of few scans, or few degradations
+  # of many? Set this to a number to shrink the pool of training scans while the
+  # step count stays fixed, which is that experiment and nothing else.
+  train_scan_limit: null
+
   # The corner detector sees the whole photo, downsized — corner localisation
   # does not need resolution the way text restoration does.
   corner_input: 256
@@ -50,9 +61,24 @@ data:
   patch_tries: 4
   min_patch_std: 0.045
 
-  # Frozen evaluation sets, generated once with a fixed seed and written to disk.
+  # Frozen evaluation sets, generated once with a fixed seed and written to disk,
+  # one set per task: the corner detector's samples include tinted stock, a
+  # distractor sheet and curled pages, none of which the enhancement network can
+  # be scored on — its target is the flat clean scan.
+  #
+  # The training bucket is frozen too. The generator never repeats a sample, so
+  # "the training set" is a distribution rather than a set of files, and a fixed
+  # draw from it is the only honest way to fill in the brief's Training row.
+  frozen_tasks: [enhance, corner]
+  frozen_train_samples: 200
   frozen_val_samples: 200
   frozen_test_samples: 200
+
+  # Deterministic patches cut from each frozen page for the per-epoch validation
+  # curve. Patch-level, so the validation loss is measured on exactly the same
+  # kind of crop as the training loss and the two curves can be read against each
+  # other; the full-page table is `evaluate.py`'s job.
+  frozen_patches_per_page: 2
 
 # --- placing the page on the background (brief §1.3) ----------------------
 synth:
@@ -106,6 +132,32 @@ degradation:
   noise_sigma: [0.004, 0.03]
   jpeg_quality: [30, 80]
 
+# --- the model ------------------------------------------------------------
+# Shape only; which model is a per-experiment choice. The first version of every
+# model in this project carries no dropout and no weight decay, because the brief
+# requires it and because the regularisation study later depends on dropout being
+# the only thing that changed.
+model:
+  name: docunet
+  base: 32                  # encoder widths 32/64/128/256, 512 at the bottleneck
+  depth: 4
+  norm: batch
+  dropout: 0.0
+  residual_output: false    # predict the correction instead of the image
+  skips: true               # false only to demonstrate what skip connections do
+
+# --- the loss -------------------------------------------------------------
+# MSE alone is minimised by the conditional mean, which is a blur, and blur is
+# exactly what makes text unreadable. L1 commits to an answer, MS-SSIM scores
+# structure at several scales, and the Sobel term puts the penalty on the stroke
+# edges where legibility lives (brief §3.2). Every ablation is these four numbers.
+loss:
+  l1: 1.0
+  mse: 0.0
+  msssim: 0.5
+  ssim: 0.0
+  sobel: 0.25
+
 # --- training -------------------------------------------------------------
 train:
   device: auto              # auto | cuda | cpu
@@ -130,3 +182,4 @@ log:
   every_n_steps: 50
   save_every_epoch: true
   keep_best_on: val_loss    # overridden per task, e.g. val_psnr / val_corner_err
+  best_mode: auto           # auto | max | min — auto reads the metric's name
