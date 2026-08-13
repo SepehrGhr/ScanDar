@@ -34,7 +34,7 @@ Built incrementally; this table is kept honest.
 | Loss and architecture ablations | configs written, runs pending |
 | Corner detection: both networks, losses, metrics and the §5.1 inference pipeline | **done — heatmap detector trained, 1.06 px on test** |
 | Real-photo study: OCR readability against a commercial scanning app | not started |
-| Dropout study: does it close the synthetic-to-real gap? | not started |
+| Dropout study: does it close the synthetic-to-real gap? | configs written, runs pending — [how it is set up](docs/dropout-study.md) |
 | The end-to-end scanner | not started |
 | Demo app, figures, written report | not started |
 

@@ -11,9 +11,12 @@ project: what it is for, how it does its job, and which decisions were deliberat
 | [Datasets, splits and frozen sets](datasets-and-splits.md) | What a training loop actually receives, how the data is split, and why validation and test are written to disk. |
 | [The enhancement network](enhancement-network.md) | The architecture, why it trains on patches, the loss that keeps text sharp, how training and evaluation work, and what the ablations are set up to answer. |
 | [Corner detection](corner-detection.md) | The same problem solved twice — coordinate regression against heatmap regression — the losses and metrics that compare them, and the classical guardrail behind the inference pipeline. |
+| [The dropout study](dropout-study.md) | The regularisation experiment *(brief §6)*: the arms, the rule that keeps them comparable, and what the baselines' own numbers already predict about the result. |
+| [Running on Colab](running-on-colab.md) | The session recipe for the machine that is not the development laptop: where the data goes, how a killed session resumes, and what throughput to expect. |
 
-Not yet built: the OCR comparison against a commercial scanning app, the dropout study, and the
-end-to-end scanner. The status table in the [top-level README](../README.md) is kept honest.
+Not yet built: the OCR comparison against a commercial scanning app, and the end-to-end scanner. The
+dropout study is set up and has not been run. The status table in the
+[top-level README](../README.md) is kept honest.
 
 ## The idea in one picture
 

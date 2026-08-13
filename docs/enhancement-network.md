@@ -312,7 +312,11 @@ affordable; here they are close to free, which changes which experiments are wor
 
 ## Not built yet
 
-The OCR comparison against the commercial scanning app, the dropout study, and the end-to-end scanner
-that chains this network to the [corner detector](corner-detection.md). The real-photo half of the
-evaluation also waits on the reference scans and the corner annotations, neither of which has been
-captured yet.
+The OCR comparison against the commercial scanning app, and the end-to-end scanner that chains this
+network to the [corner detector](corner-detection.md). The real-photo half of the evaluation also
+waits on the reference scans and the corner annotations, neither of which has been captured yet.
+
+The [dropout study](dropout-study.md) *(brief §6)* is set up and not yet run: `enhance_dropout`
+inherits `enhance_realistic` and adds `bottleneck_dropout: 0.2`, `enhance_dropout_wide` puts a
+smaller rate in every block instead, and both pin the 20-epoch schedule the baseline actually ran so
+the comparison cannot turn into a comparison of schedules.

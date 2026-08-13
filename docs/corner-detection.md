@@ -480,5 +480,7 @@ page, and those want opposite fixes.
 **The real-photo half of the comparison**, which is the half the brief cares most about. It needs the
 Roboflow COCO-keypoints export, which has not landed; `scripts/parse_roboflow.py` and the real-photo
 dataset are deliberately unwritten rather than written blind against an export whose shape is unknown.
-Also the dropout study *(brief §6)*, the failure-case galleries and PCK curve figures, and the
-end-to-end scanner that chains this detector to the enhancement network *(brief §7, the bonus)*.
+Also the failure-case galleries and PCK curve figures, and the end-to-end scanner that chains this
+detector to the enhancement network *(brief §7, the bonus)*. The [dropout study](dropout-study.md)
+*(brief §6)* is set up — `corner_reg_dropout` and `corner_heat_dropout` inherit these two configs and
+change one line each — and neither arm has been trained.
