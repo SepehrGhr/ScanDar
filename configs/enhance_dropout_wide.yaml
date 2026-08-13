@@ -1,0 +1,32 @@
+# The enhancement network with dropout throughout the trunk  (brief §6)
+#
+#   python train.py    --config configs/enhance_dropout_wide.yaml
+#   python evaluate.py --config configs/enhance_dropout_wide.yaml
+#
+# The second arm of the placement sweep: a smaller rate in every convolutional
+# block — encoder, bottleneck and decoder — instead of a larger one at the
+# bottleneck alone. Same baseline, same schedule, same seed; the two arms differ
+# from each other by where the noise is injected and by nothing else.
+#
+# 0.1 rather than 0.2 because this rate applies at nine places instead of one,
+# and because `Dropout2d` drops whole feature channels: at 0.2 an early encoder
+# block with 32 channels loses six of them per forward pass, and the skip
+# connection carries that loss straight to the decoder.
+#
+# This is the arm to skip if GPU time is short. It costs the same ~2 h as the
+# bottleneck arm and it answers a placement question rather than the brief's
+# question, which is whether dropout helps at all.
+
+_base_: enhance_realistic.yaml
+
+run:
+  name: enhance_dropout_wide
+  notes: >
+    The realistic-canvas baseline with Dropout2d(0.1) in every ConvBlock.
+    Still no weight decay.
+
+model:
+  dropout: 0.1            # every ConvBlock, bottleneck included
+
+train:
+  epochs: 20              # match the baseline exactly

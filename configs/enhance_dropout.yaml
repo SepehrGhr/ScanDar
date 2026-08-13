@@ -1,0 +1,54 @@
+# The enhancement network with dropout at the bottleneck  (brief §6)
+#
+#   python train.py    --config configs/enhance_dropout.yaml
+#   python evaluate.py --config configs/enhance_dropout.yaml
+#
+# The regularisation study the brief asks for: retrain with dropout and nothing
+# else changed, then compare. This file inherits `enhance_realistic.yaml`, which
+# is the trained baseline it is scored against, and differs from it by two lines
+# — the run name and the dropout rate. Weight decay stays at 0 so the study has
+# exactly one variable in it.
+#
+# **The schedule is pinned here on purpose.** The baseline was run with
+# `--set train.epochs=20` rather than the 60 in `base.yaml`, so a dropout arm
+# left at the inherited default would train three times as long as the thing it
+# is compared against and the table would be measuring the schedule. Twenty is
+# written into this file so the command line cannot forget it.
+#
+# --- why the bottleneck ---------------------------------------------------
+#
+# Dropout in an encoder-decoder with skip connections is not one decision. The
+# skips carry high-resolution detail straight across to the decoder, so dropping
+# channels in the encoder blocks damages exactly the signal the output's fine
+# detail is reconstructed from, and the decoder's last block sits one 1x1
+# convolution away from the pixels. The bottleneck is the one place where the
+# representation is global, most redundant, and furthest from the output — the
+# usual place to put it, and the arm to run if only one is run.
+#
+# `configs/enhance_dropout_wide.yaml` is the other half of that sweep: a smaller
+# rate everywhere instead of a larger one in one place.
+#
+# --- what to expect -------------------------------------------------------
+#
+# `reports/PREDICTIONS.md` §2 commits, before this runs, to dropout buying
+# approximately nothing on the synthetic metrics and slightly hurting them: the
+# baseline's train-to-test gap is 0.14 dB, so there is no overfitting here for
+# regularisation to remove. The question the brief actually poses is whether the
+# gap to the *real* photos shrinks, and that column is filled in from the same
+# checkpoints once the reference scans and the OCR metrics exist — no retraining.
+
+_base_: enhance_realistic.yaml
+
+run:
+  name: enhance_dropout
+  notes: >
+    The realistic-canvas baseline with Dropout2d(0.2) at the bottleneck only.
+    Still no weight decay: dropout is the single variable.
+
+model:
+  # Channel dropout, not pixel dropout — see ConvBlock. Left at 0 everywhere
+  # else, which is what makes this the bottleneck-only arm.
+  bottleneck_dropout: 0.2
+
+train:
+  epochs: 20              # match the baseline exactly; see the note above

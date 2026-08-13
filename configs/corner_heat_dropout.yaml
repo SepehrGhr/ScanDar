@@ -1,0 +1,31 @@
+# Heatmap regression with dropout at the bottleneck  (brief §6)
+#
+#   python train.py    --config configs/corner_heat_dropout.yaml
+#   python evaluate.py --config configs/corner_heat_dropout.yaml
+#
+# `corner_heat.yaml` with one line changed, which makes this the shipped
+# detector's half of the regularisation study — `corner_heat` is what the batch
+# scripts default to, so whether dropout helps it is the question with practical
+# consequences rather than only reportable ones.
+#
+# The bottleneck for the same reason as in the enhancement network: this trunk
+# has skip connections, and dropping channels in the encoder blocks corrupts the
+# high-resolution detail the skips hand to the decoder — which, for a detector,
+# is precisely the evidence that localises a corner to a pixel rather than to a
+# region. `configs/corner_heat_dropout_wide.yaml` is the other placement.
+#
+# A caution when reading the result: the heatmap detector is already at 1.06 px
+# on test with a train-to-test spread of 0.27 px. There is no headroom for a
+# regulariser to recover, so a small *loss* of accuracy here is the expected
+# outcome and is not a bug in the arm.
+
+_base_: corner_heat.yaml
+
+run:
+  name: corner_heat_dropout
+  notes: >
+    The heatmap detector with Dropout2d(0.2) at the bottleneck only.
+    No weight decay.
+
+model:
+  bottleneck_dropout: 0.2

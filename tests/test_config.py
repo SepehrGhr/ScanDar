@@ -85,3 +85,39 @@ def test_shipped_base_config_holds_the_documented_defaults():
     # Splitting by source scan is the rule the whole dataset design rests on.
     assert config.data.n_val_scans + config.data.n_test_scans < 50
     assert config.data.patch_size <= min(config.data.rect_size)
+
+
+@pytest.mark.parametrize(
+    "baseline, arm, expected",
+    [
+        ("enhance_realistic", "enhance_dropout", {"bottleneck_dropout": 0.2}),
+        ("enhance_realistic", "enhance_dropout_wide", {"dropout": 0.1}),
+        ("corner_reg", "corner_reg_dropout", {"fc_dropout": 0.3}),
+        ("corner_heat", "corner_heat_dropout", {"bottleneck_dropout": 0.2}),
+        ("corner_heat", "corner_heat_dropout_wide", {"dropout": 0.1}),
+    ],
+)
+def test_each_dropout_arm_differs_from_its_baseline_by_dropout_alone(baseline, arm, expected):
+    """The regularisation study *(brief §6)* only means anything if dropout is the
+    single variable, and an arm that quietly inherits a different schedule or a
+    different canvas measures that instead. The epochs are the trap: the
+    enhancement baseline was run with an override rather than the file's default,
+    so the arms pin the schedule in the file."""
+    base = load_config(paths.repo / "configs" / f"{baseline}.yaml")
+    study = load_config(paths.repo / "configs" / f"{arm}.yaml")
+
+    for key in ("data", "synth", "degradation", "loss", "project"):
+        assert study.get(key) == base.get(key), f"{arm} changed {key}"
+    assert study.train.weight_decay == 0.0, "dropout is supposed to be the only regulariser"
+    assert study.train.epochs == 20, "the trained baselines are all 20-epoch runs"
+    for key, value in base.train.items():
+        if key != "epochs":
+            assert study.train[key] == value, f"{arm} changed train.{key}"
+
+    changed = {
+        key for key in set(base.get("model")) | set(study.get("model"))
+        if base.get("model").get(key) != study.get("model").get(key)
+    }
+    assert changed == set(expected)
+    for key, value in expected.items():
+        assert study.model[key] == value

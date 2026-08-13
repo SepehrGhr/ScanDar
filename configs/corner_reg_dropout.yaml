@@ -1,0 +1,32 @@
+# Coordinate regression with dropout between the fully connected layers  (brief §6)
+#
+#   python train.py    --config configs/corner_reg_dropout.yaml
+#   python evaluate.py --config configs/corner_reg_dropout.yaml
+#
+# `corner_reg.yaml` with one line changed. Everything else — the photos, the
+# 20 x 150 x 16 schedule, the optimiser, the seed, the loss — is inherited, so
+# the before-and-after table measures dropout and not the run.
+#
+# **This is the arm with the strongest case in the whole study.** The flatten
+# reads an 8x8x256 grid into a 512-unit layer: 8.4 M weights, four fifths of the
+# model's parameters, learned as one dense map from feature position to
+# coordinate. It is the only genuinely over-parameterised map in this project,
+# and the fully connected layers are the place the brief names for dropout.
+# `reports/PREDICTIONS.md` §2 predicts, on record, that if dropout helps anywhere
+# it helps here.
+#
+# 0.3 is the classic rate for a hidden fully connected layer, and the layer is
+# wide enough (512 units) to absorb it. Nothing on the convolutional side is
+# touched: `dropout` stays 0, so this arm and the heatmap arms are not quietly
+# testing two different things.
+
+_base_: corner_reg.yaml
+
+run:
+  name: corner_reg_dropout
+  notes: >
+    Coordinate regression with Dropout(0.3) between FC 512 and the eight
+    outputs. Conv side untouched, no weight decay.
+
+model:
+  fc_dropout: 0.3

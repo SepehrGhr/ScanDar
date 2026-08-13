@@ -177,3 +177,58 @@ def test_the_pck_curve_is_drawn_from_the_numbers_evaluate_wrote(tmp_path):
     }
     written = pck_curves(curves, tmp_path / "pck.png")
     assert written.exists() and written.stat().st_size > 0
+
+
+# --- the dropout study's before-and-after table -----------------------------
+def _write_restoration_table(directory, name, rows):
+    import csv
+
+    path = directory / f"{name}_restoration.csv"
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def test_the_dropout_table_signs_every_change_the_same_way(tmp_path):
+    """A table where "+0.4" means better in one row and worse in the next is a
+    table that will be read wrong, and the whole study is a question of sign:
+    the metrics run in opposite directions and the expected result is a null."""
+    import compare_dropout
+
+    def restoration(psnr, split="Test", variant="enhanced"):
+        return {"split": split, "variant": variant, "n": "200", "psnr": psnr,
+                "psnr_std": "2.0", "ssim": "0.95", "ssim_std": "0.02"}
+
+    def corners(err, split="Test", variant="detector"):
+        return {"split": split, "variant": variant, "n": "200", "corner_err_px": err,
+                "corner_err_std": "1.0", "corner_err_pct": "0.3", "worst_corner_px": "2.0",
+                "pck": "0.9", "quad_iou": "0.98"}
+
+    # PSNR is better when larger, corner error when smaller. Both arms below are
+    # worse than their baseline, so both changes must come out negative.
+    _write_restoration_table(tmp_path, "base_e", [restoration("26.0"),
+                                                  restoration("27.0", split="Training")])
+    _write_restoration_table(tmp_path, "drop_e", [restoration("25.0"),
+                                                  restoration("25.2", split="Training")])
+    _write_corner_table(tmp_path, "base_c", [corners("1.0"), corners("0.8", split="Training")])
+    _write_corner_table(tmp_path, "drop_c", [corners("2.0"), corners("1.9", split="Training")])
+
+    rows = compare_dropout.compare([("base_e", "drop_e"), ("base_c", "drop_c")],
+                                   directory=tmp_path)
+    psnr = next(r for r in rows if r["metric"].startswith("PSNR"))
+    error = next(r for r in rows if r["metric"].startswith("corner error"))
+    assert psnr["change"] == -1.0 and error["change"] == -1.0
+    assert psnr["better"] == error["better"] == "baseline"
+    # And the train-to-test gap is signed the same way: positive is worse unseen.
+    assert psnr["baseline_train_gap"] == 1.0 and error["baseline_train_gap"] == 0.2
+
+
+def test_an_arm_that_has_not_been_evaluated_yet_is_skipped_not_fatal(tmp_path, capsys):
+    """The arms are trained one at a time over several sessions, so the table has
+    to be readable while the rest are still running."""
+    import compare_dropout
+
+    assert compare_dropout.compare([("nothing", "nowhere")], directory=tmp_path) == []
+    assert "no evaluation table yet" in capsys.readouterr().out

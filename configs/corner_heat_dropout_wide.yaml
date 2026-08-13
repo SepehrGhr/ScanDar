@@ -1,0 +1,24 @@
+# Heatmap regression with dropout throughout the trunk  (brief §6)
+#
+#   python train.py    --config configs/corner_heat_dropout_wide.yaml
+#   python evaluate.py --config configs/corner_heat_dropout_wide.yaml
+#
+# The second placement for the heatmap detector, matching
+# `enhance_dropout_wide.yaml`: 0.1 in every convolutional block instead of 0.2 at
+# the bottleneck alone. Running both U-Nets' sweeps the same way is what makes
+# "where dropout goes matters more than whether it is there" a claim the tables
+# can support rather than an anecdote from one model.
+#
+# Optional, and the first arm to cut if GPU time is short — it answers a
+# placement question, not the brief's question.
+
+_base_: corner_heat.yaml
+
+run:
+  name: corner_heat_dropout_wide
+  notes: >
+    The heatmap detector with Dropout2d(0.1) in every ConvBlock.
+    No weight decay.
+
+model:
+  dropout: 0.1
