@@ -315,6 +315,110 @@ pages this project *creates*; these describe pages it must not refuse to believe
 photographed close enough to fill the frame or with a corner just off it, and rejecting that would
 send a perfectly good detection to the fallback.
 
+## The verdict *(brief §5)*
+
+Both detectors trained on identical samples, identical schedules, identical seeds — 20 epochs ×
+150 steps at batch 16, about two hours each. On the frozen synthetic test bucket:
+
+| Detector | corner error (px @256) | % of diagonal | PCK@2% | quad IoU |
+| :--- | ---: | ---: | ---: | ---: |
+| **`corner_heat`** — heatmap regression | **1.06 ± 2.44** | **0.29%** | **0.955** | **0.9830** |
+| `corner_reg` — direct coordinate regression | 3.16 ± 3.02 | 0.87% | 0.830 | 0.9577 |
+| *classical baseline* | *41.66* | *11.51%* | *0.485* | *0.6582* |
+
+**Heatmap regression wins, by three times on mean error**, and it wins at every threshold on the PCK
+curve — so the verdict does not depend on where the threshold was put, which is the one way a
+comparison like this is usually rigged.
+
+![PCK curves](../reports/figures/corners/pck_curves.png)
+
+The shape of that curve is more informative than the table. The gap is **widest on the left and
+closes on the right**: at a quarter of a percent of the diagonal the heatmap detector places all four
+corners on 61% of photos and the regressor on none, while by 10% both are at 99%. The two are equally
+*reliable* — they find the page equally often — and they are not remotely equally *precise*. That is
+exactly the difference the two formulations predict: keeping the problem spatial buys sub-pixel
+accuracy, and it buys nothing else.
+
+Both comfortably clear the classical baseline, which is the line either one had to clear to justify
+its parameters.
+
+### Which was easier to train?
+
+Neither needed a single adjustment. Both ran first time on the shipped config, at the shipped
+learning rate, and neither showed any instability — the prediction that the regressor would be the
+fiddlier of the two, on the strength of having 8.4 M parameters in one fully connected layer, simply
+did not happen.
+
+The regressor's curve was still improving when the schedule ended (2.80 → 2.73 → 2.72 over the last
+three epochs, with the cosine already at its 1e-6 floor), so its number is a floor for the
+architecture rather than a limit of it. That does not threaten the verdict: a threefold gap does not
+close with a longer schedule when neither model is overfitting and both curves are flattening.
+
+**On training either of them longer.** Both are converged *for this schedule* rather than converged,
+and neither overfits, so a longer run should help both. Two things make that less attractive than it
+sounds. Raising `train.epochs` and resuming does not extend the cosine — it *restarts* it, because
+the schedule is a function of the total step count: resuming at step 3000 with `epochs=40` puts the
+learning rate back at 1.1e-4 from the 1e-6 it finished on. That is a legitimate warm restart, but it
+is not the run a fresh 40-epoch schedule would produce, and saying "trained for 40 epochs" afterwards
+would not be quite true. And whatever is done has to be done to *both* detectors, or the comparison
+stops being one — which doubles the cost to about eight hours for a verdict that is not in doubt.
+
+The useful version of the idea is to leave this pair alone as the controlled comparison and train the
+*winner* longer as the model that actually ships. There the ceiling matters and there is no
+comparison to protect.
+
+### What the failure cases say
+
+![failure cases](../reports/figures/corners/failure_cases.png)
+
+**The distractor sheet is the story.** The generator puts a second piece of paper in the frame in 20%
+of corner samples. It accounts for **80% of the heatmap detector's ten worst test photos** and 70% of
+the regressor's — a four-fold enrichment for a mechanism that was written down in advance as the
+place heatmaps should suffer. The pictures show why: the map has two plausible peaks and the corner
+jumps to the wrong sheet's.
+
+### Was the prediction right?
+
+[`reports/PREDICTIONS.md`](../reports/PREDICTIONS.md) was committed before either detector took a
+training step, and it is scored here as written — not edited afterwards.
+
+| Predicted | Measured | |
+|---|---|---|
+| heatmaps win | heatmaps win | ✅ |
+| "by roughly a factor of two" | a factor of three | ✅ direction, understated |
+| heatmap 2.0–4.0 px | **1.06 px** | ❌ better than predicted |
+| regression 5.0–9.0 px | **3.16 px** | ❌ better than predicted |
+| heatmap PCK ≥ 0.85 | 0.955 | ✅ |
+| regression PCK 0.35–0.65 | **0.830** | ❌ much better than predicted |
+| both quad IoU above their bars | 0.983 / 0.958 | ✅ |
+| both good enough to rectify with | both above 0.95 IoU | ✅ |
+| distractor samples are the heatmap's worst | 80% of its worst ten | ✅ |
+| regression the fiddlier to train | neither needed anything | ❌ |
+| regression fails *globally*, heatmaps *locally* | see below | ❌ |
+
+**Both models beat their predicted ranges**, and the regressor beat its by the widest margin — the
+prediction under-rated direct regression substantially. The most likely reason is the one the
+prediction itself named as regression's structural handicap: it has to learn the map from feature
+position to coordinate from scratch. With an unlimited generator, "from scratch" is affordable in a
+way it would not be on a fixed dataset, and 48 000 never-repeated photos is apparently enough to
+learn it well.
+
+**The failure-shape claim is the interesting miss.** The prediction said fully connected layers
+regress toward the mean, so the regressor should fail by sliding the *whole quad* toward a plausible
+average page, while a heatmap fails one corner at a time. The failure gallery looks like that. It is
+not. Decomposing each error into a shared displacement of all four corners plus a per-corner
+residual:
+
+| | shared shift | per-corner residual | shared fraction |
+|---|---:|---:|---:|
+| `corner_heat` | 0.70 px | 1.11 px | 39% |
+| `corner_reg` | 1.43 px | 3.00 px | **32%** |
+
+The regressor's errors are *less* global than the heatmap detector's, not more. Both are dominated by
+independent per-corner error. The visual impression came from five hand-picked worst cases, which is
+exactly the sample a plausible story gets built on — and the reason the claim was written down in a
+falsifiable form beforehand.
+
 ## What the heatmap detector measured
 
 20 epochs × 150 steps at batch 16 — 48 000 photos, 2.2 hours on the 3060.
