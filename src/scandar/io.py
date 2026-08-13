@@ -138,6 +138,37 @@ def list_images(directory: Path | str) -> list[Path]:
     return sorted(files, key=natural_key)
 
 
+def collect_inputs(patterns) -> list[Path]:
+    """Files, directories and globs, all flattened into one naturally-sorted list.
+
+    What every batch script wants from a ``--input`` argument. ``glob.glob``
+    rather than ``Path.glob``, because the latter raises on an absolute pattern —
+    and an absolute pattern is exactly what a shell hands over when someone types
+    a path from anywhere but the repository root.
+
+    A pattern that matches nothing is an error rather than a shrug. Processing
+    zero photos and reporting success is the worst way a batch run can fail.
+    """
+    import glob as globbing
+
+    found: list[Path] = []
+    for pattern in patterns:
+        path = Path(pattern).expanduser()
+        if path.is_dir():
+            found.extend(list_images(path))
+        elif path.exists():
+            found.append(path)
+        else:
+            matches = sorted(Path(m) for m in globbing.glob(str(path), recursive=True))
+            images = [m for m in matches if m.suffix.lower() in IMAGE_SUFFIXES]
+            if not images:
+                raise SystemExit(f"no such file, directory or matching image: {pattern}")
+            found.extend(images)
+
+    unique = list(dict.fromkeys(p.resolve() for p in found))
+    return sorted(unique, key=natural_key)
+
+
 def natural_key(path: Path | str):
     """Sort key that reads embedded digit runs as numbers (``Image2`` < ``Image10``)."""
     import re
