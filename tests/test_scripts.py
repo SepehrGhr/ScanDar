@@ -126,3 +126,54 @@ def test_a_flat_map_does_not_divide_by_its_own_zero_range():
     photo = np.full((64, 64, 3), 200, dtype=np.uint8)
     blended = heatmap_overlay(photo, np.zeros((4, 16, 16), dtype=np.float32))
     assert np.isfinite(blended).all() and blended.shape == photo.shape
+
+
+# --- putting the detectors head to head -------------------------------------
+def _write_corner_table(directory, name, rows):
+    import csv
+
+    path = directory / f"{name}_corners.csv"
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def test_the_comparison_takes_one_row_per_detector_and_one_baseline(tmp_path):
+    """The classical baseline is the same detector scored twice, so quoting it
+    once per run would put three identical rows in a two-detector table."""
+    import compare_detectors
+
+    def row(variant, err):
+        return {"split": "Test", "variant": variant, "n": "200", "corner_err_px": err,
+                "corner_err_std": "1.0", "corner_err_pct": "0.3", "worst_corner_px": "2.0",
+                "pck": "0.9", "quad_iou": "0.98"}
+
+    for name, err in (("a_run", "1.0"), ("b_run", "3.0")):
+        _write_corner_table(tmp_path, name, [row("detector", err),
+                                             row("classical baseline", "40.0"),
+                                             dict(row("detector", "9.9"), split="Validation")])
+
+    rows = compare_detectors.comparison_rows(["a_run", "b_run"], "Test", directory=tmp_path)
+    assert [r["run"] for r in rows] == ["a_run", "b_run", "classical"]
+    assert "a_run" in compare_detectors.markdown_table(rows, "Test")
+
+
+def test_comparing_a_run_that_was_never_evaluated_says_so(tmp_path):
+    import compare_detectors
+
+    with pytest.raises(SystemExit, match="evaluate.py"):
+        compare_detectors.comparison_rows(["never_run"], directory=tmp_path)
+
+
+def test_the_pck_curve_is_drawn_from_the_numbers_evaluate_wrote(tmp_path):
+    """Two detectors on one axis, which is how the brief's comparison is read."""
+    from scandar.viz import pck_curves
+
+    curves = {
+        "heat": [{"threshold_pct": 0.5, "pck": 0.8}, {"threshold_pct": 2.0, "pck": 0.95}],
+        "reg": [{"threshold_pct": 0.5, "pck": 0.1}, {"threshold_pct": 2.0, "pck": 0.83}],
+    }
+    written = pck_curves(curves, tmp_path / "pck.png")
+    assert written.exists() and written.stat().st_size > 0

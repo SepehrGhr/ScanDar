@@ -41,6 +41,11 @@ from scandar.io import collect_inputs, imread_rgb, imwrite_rgb, paths
 from scandar.model import load_model
 from scandar.pipelines import detect_corners, draw_corners, rectify_document
 
+#: The brief asks §5.1's pipeline to use "your better trained model", and the
+#: comparison settled which that is: heatmap regression, three times more
+#: accurate than direct coordinate regression and ahead at every PCK threshold.
+#: `--checkpoint outputs/runs/corner_reg/best.pt` runs the other one; the pipeline
+#: reads either formulation without being told which it was handed.
 DEFAULT_RUN = "corner_heat"
 
 

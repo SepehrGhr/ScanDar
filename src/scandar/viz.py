@@ -3,16 +3,15 @@
 One shared matplotlib style — consistent palette, 200 dpi, readable in print — so
 every figure in the report looks like it came from the same project.
 
-Built so far: the training curve. The brief asks for it by name — "we will plot
+Built so far: the training curve — the brief asks for it by name, "we will plot
 the loss on both the training and validation sets against the number of epochs...
 Analyzing this graph is essential for diagnosing the model's behaviour" *(brief
-§3.2)* — and it is the one figure that has to exist as soon as a model has been
-trained, rather than at the end with the rest.
+§3.2)* — and the PCK curve that decides the corner comparison *(brief §5)*.
 
 Still to build, when the results they draw exist: dataset contact sheets, the
 degradation pipeline as a step-by-step strip, the "spot the fake" panel, the loss
-ablation as zoomed text crops, real-photo triplets, corner prediction overlays and
-error curves, the dropout study's gap chart, and the end-to-end storyboard.
+ablation as zoomed text crops, real-photo triplets, the dropout study's gap chart,
+and the end-to-end storyboard.
 """
 
 from __future__ import annotations
@@ -124,6 +123,65 @@ def training_curves(run_dir: Path | str, out_path: Path | str | None = None, bas
         break
 
     out_path = Path(out_path) if out_path else run_dir / "training_curves.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(out_path)
+    plt.close(figure)
+    return out_path
+
+
+def pck_curves(curves: dict, out_path: Path | str, threshold_pct: float | None = 2.0):
+    """Success rate against threshold, one line per detector *(brief §5)*.
+
+    *curves* maps a label to the rows ``evaluate.py`` wrote into
+    ``<run>_pck_curve.csv``. The curve rather than a single number, because the
+    strict success rate depends entirely on where the threshold is put, and
+    choosing that after seeing the results is how a comparison stops being one.
+    Reading the whole curve also separates two things a single number conflates:
+    a detector that is *more precise* lifts the left-hand end, and one that is
+    *more reliable* lifts the right-hand end, and they need not be the same
+    detector.
+
+    The x axis is logarithmic. Everything interesting happens between a quarter
+    of a percent and three percent of the diagonal, and a linear axis spends most
+    of its width on the region where every curve has already reached 1.0.
+    """
+    import matplotlib.pyplot as plt
+
+    use_style()
+    figure, axes = plt.subplots(figsize=(7, 4.6))
+    palette = [COLORS["train"], COLORS["val"], COLORS["accent"], "#6b46c1", COLORS["muted"]]
+
+    for index, (label, rows) in enumerate(curves.items()):
+        axes.plot(
+            [float(r["threshold_pct"]) for r in rows],
+            [float(r["pck"]) for r in rows],
+            marker="o",
+            markersize=3.5,
+            color=palette[index % len(palette)],
+            label=label,
+        )
+
+    if threshold_pct:
+        axes.axvline(threshold_pct, color=COLORS["baseline"], linestyle="--", linewidth=1.1)
+        # Along the top, where no curve goes: the lower right belongs to the
+        # legend and the middle belongs to whichever detector is losing.
+        axes.annotate(
+            f"{threshold_pct:g}% — the headline threshold",
+            xy=(threshold_pct, 1.0),
+            xytext=(5, -11),
+            textcoords="offset points",
+            fontsize=8,
+            color=COLORS["baseline"],
+        )
+
+    axes.set_xscale("log")
+    axes.set_xlabel("threshold, % of the image diagonal")
+    axes.set_ylabel("photos with all four corners inside")
+    axes.set_ylim(-0.02, 1.02)
+    axes.set_title("Corner detection: strict success rate against threshold")
+    axes.legend(loc="lower right")
+
+    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(out_path)
     plt.close(figure)

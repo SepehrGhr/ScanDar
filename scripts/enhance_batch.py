@@ -43,6 +43,8 @@ from scandar.model import load_model
 from scandar.pipelines import detect_corners, draw_corners, enhance_document, rectify_document
 
 DEFAULT_RUN = "enhance_realistic"
+#: The better of the two detectors, decided by the comparison rather than by
+#: preference — see scripts/compare_detectors.py.
 DEFAULT_DETECTOR = "corner_heat"
 
 
