@@ -63,6 +63,19 @@ data:
   # generalise from 1152x1536 composites to 1920x2560 photographs.
   canvas: [1920, 2560]
 
+  # A canvas this size costs 2.2x as much to composite, and the loop is fed by
+  # the CPU, so that lands directly on the wall clock. Amortising each photo over
+  # eight patches instead of four buys most of it back: measured end to end,
+  # 16.7 samples/s against 11.2, without changing anything the model sees in a
+  # given photo. Twelve was tried and is slower than eight, as are twelve
+  # dataloader workers -- past a point the machine is contending with itself.
+  #
+  # The cost is diversity per gradient step: a batch of 16 now spans two
+  # composited photos rather than four, so half as many distinct degradations
+  # inform each update. Over a 30-epoch run that is still 24 000 distinct
+  # photos, well past where the first baseline's curve had flattened.
+  patches_per_photo: 8
+
 degradation:
   # Starting at 1.0 rather than 2.0 is the point: some samples now arrive with
   # their resolution intact, which is what a close, steady photo looks like.
