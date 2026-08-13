@@ -1,8 +1,8 @@
 """Command line entry point: ``scandar <command>``.
 
-Everything implemented so far is data preparation and verification; training,
-evaluation and the scanner are not built yet and say so plainly rather than
-failing with a traceback.
+Data preparation, verification, training, evaluation and enhancement inference
+all work. The end-to-end scanner does not exist yet — it needs the corner
+detector — and says so plainly rather than failing with a traceback.
 """
 
 from __future__ import annotations
@@ -23,10 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--long-side", type=int, default=1600, help="cached scan long side in px")
     prep.add_argument("--force", action="store_true", help="rebuild the cache from scratch")
 
-    freeze = sub.add_parser("freeze-eval", help="write the frozen synthetic val/test sets")
+    freeze = sub.add_parser("freeze-eval", help="write the frozen synthetic evaluation sets")
     freeze.add_argument("--config", default=None, help="defaults to configs/base.yaml")
     freeze.add_argument("--set", nargs="*", default=[], dest="overrides", metavar="key.path=value")
     freeze.add_argument("--seed", type=int, default=None, help="overrides data.split_seed")
+    freeze.add_argument("--task", nargs="*", default=None, help="enhance, corner (default: both)")
     freeze.add_argument("--force", action="store_true", help="regenerate even if up to date")
 
     check = sub.add_parser("sanity", help="verify the data, the layout and the environment")
@@ -39,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
     ev = sub.add_parser("evaluate", help="score a trained model")
     ev.add_argument("--config", required=True)
     ev.add_argument("--set", nargs="*", default=[], dest="overrides", metavar="key.path=value")
+
+    enhance = sub.add_parser("enhance", help="restore an already-rectified page")
+    enhance.add_argument("--input", required=True)
+    enhance.add_argument("--output", required=True)
+    enhance.add_argument("--checkpoint", required=True, help="a best.pt from a training run")
+    enhance.add_argument("--max-side", type=int, default=None, help="cap the working resolution")
 
     scan = sub.add_parser("scan", help="photo in, clean scan out (bonus)")
     scan.add_argument("--input", required=True)
@@ -63,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
 
         config_path = args.config or paths.repo / "configs" / "base.yaml"
         config = load_config(config_path, overrides=args.overrides)
-        freeze_eval_sets(config, seed=args.seed, force=args.force)
+        freeze_eval_sets(config, seed=args.seed, force=args.force, tasks=args.task)
         return 0
 
     if args.command == "sanity":
@@ -74,17 +81,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "train":
         from . import train as train_module
 
-        return train_module.main(["--config", args.config, *args.overrides])
+        forwarded = ["--config", args.config]
+        if args.overrides:
+            forwarded += ["--set", *args.overrides]
+        return train_module.main(forwarded)
 
     if args.command == "evaluate":
         from . import evaluate as evaluate_module
 
-        return evaluate_module.main(["--config", args.config, *args.overrides])
+        forwarded = ["--config", args.config]
+        if args.overrides:
+            forwarded += ["--set", *args.overrides]
+        return evaluate_module.main(forwarded)
+
+    if args.command == "enhance":
+        from .pipelines import enhance_file
+
+        written = enhance_file(args.input, args.output, args.checkpoint, max_side=args.max_side)
+        print(f"wrote {written}")
+        return 0
 
     if args.command == "scan":
         raise SystemExit(
-            "The end-to-end scanner is not built yet. Until it is, the two stages "
-            "are separate: document enhancement and corner detection."
+            "The end-to-end scanner is not built yet — it needs the corner detector, "
+            "which is not built either. The enhancement half works today: "
+            "`scandar enhance --input page.jpg --output scan.png --checkpoint <best.pt>` "
+            "takes an already-rectified page."
         )
 
     raise SystemExit(f"unknown command: {args.command}")
