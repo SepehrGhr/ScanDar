@@ -1,0 +1,3 @@
+split,variant,n,psnr,psnr_std,ssim,ssim_std
+Test,degraded input,200,15.305,4.878,0.8489,0.0643
+Test,enhanced,200,26.461,1.465,0.9566,0.0155

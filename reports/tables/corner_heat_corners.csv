@@ -1,0 +1,7 @@
+split,variant,n,corner_err_px,corner_err_std,corner_err_pct,worst_corner_px,pck,quad_iou
+Training,detector,200,0.787,1.234,0.2173,1.768,0.975,0.9863
+Training,classical baseline,200,43.525,43.627,12.0221,56.617,0.41,0.6398
+Validation,detector,200,0.702,0.835,0.194,1.445,0.98,0.9877
+Validation,classical baseline,200,36.665,43.734,10.1274,47.988,0.545,0.6927
+Test,detector,200,1.059,2.438,0.2925,2.44,0.955,0.983
+Test,classical baseline,200,41.663,46.13,11.508,53.746,0.485,0.6582
