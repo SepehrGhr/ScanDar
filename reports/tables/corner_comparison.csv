@@ -1,0 +1,4 @@
+split,variant,n,corner_err_px,corner_err_std,corner_err_pct,worst_corner_px,pck,quad_iou,run
+Test,detector,200,1.059,2.438,0.2925,2.44,0.955,0.983,corner_heat
+Test,detector,200,3.158,3.018,0.8722,5.645,0.83,0.9577,corner_reg
+Test,classical baseline,200,41.663,46.13,11.508,53.746,0.485,0.6582,classical
