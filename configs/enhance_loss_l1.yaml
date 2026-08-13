@@ -1,0 +1,16 @@
+# Loss ablation: L1 only  (brief §3.2)
+#
+# The first step away from MSE. L1 is minimised by the conditional median rather
+# than the mean, so where the network is unsure exactly where a stroke edge falls
+# it commits to one position instead of averaging over all of them.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_loss_l1
+
+loss:
+  l1: 1.0
+  mse: 0.0
+  msssim: 0.0
+  sobel: 0.0

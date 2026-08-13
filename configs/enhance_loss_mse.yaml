@@ -1,0 +1,17 @@
+# Loss ablation: plain MSE  (brief §3.2)
+#
+# The control the brief's own question is about — "a standard pixel-wise loss like
+# MSE is known to produce blurry outputs". This run is what that claim is checked
+# against, and the zoomed text crops from it sit next to the combined loss's in
+# the report.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_loss_mse
+
+loss:
+  l1: 0.0
+  mse: 1.0
+  msssim: 0.0
+  sobel: 0.0

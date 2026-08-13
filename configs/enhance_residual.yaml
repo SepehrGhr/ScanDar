@@ -1,0 +1,13 @@
+# Architecture ablation: predict the correction, not the image  (brief §3.1)
+#
+# Most of a document photo is already correct, so a residual head starts the
+# network at "change nothing" instead of at "invent a page". The correction goes
+# through a tanh, whose range is exactly the largest change a pixel can need.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_residual
+
+model:
+  residual_output: true

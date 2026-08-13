@@ -1,0 +1,30 @@
+# Architecture ablation: a wider network — base 48 instead of 32
+#
+# Encoder widths 48/96/192/384 with a 768 bottleneck: 17.5 M parameters against
+# the baseline's 7.8 M, so 2.25x the capacity.
+#
+# The reason this is worth trying before anything else is a throughput accident.
+# The training loop is fed by the CPU, not limited by the GPU — the synthetic
+# generator produces about 21 samples per second and the baseline model could
+# consume 100 — so the GPU spends most of the run idle. Spending 2.25x more of it
+# per step costs almost nothing in wall clock: measured, 19.7 samples/s against
+# the baseline's 21.0, a 7% slowdown for more than twice the parameters.
+#
+# Whether the extra capacity is *used* is the open question. The baseline showed
+# essentially no overfitting — training and test differ by 0.75 dB — which is the
+# signature of a model limited by capacity or by data realism rather than by
+# regularisation. If that reading is right, this is where the headroom is.
+#
+# Still no dropout and no weight decay: this changes width and nothing else.
+#
+# Peak memory sits near 4.5 GB at batch 16, which fits a 6 GB card but not with
+# much to spare. Halve `train.batch_size` and double `train.grad_accum` if a
+# smaller GPU runs out — the effective batch stays 16 either way.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_base48
+
+model:
+  base: 48

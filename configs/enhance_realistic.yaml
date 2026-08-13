@@ -1,0 +1,70 @@
+# Recalibrate the generator so the training input keeps enough detail to restore
+#
+# The baseline model does not produce soft output — measured on a real photo it
+# raises edge energy by 75%. What it produces is confident, contrasty strokes in
+# the wrong shape: "joint distribution" comes back as "geint delehelition". It is
+# inventing letterforms rather than restoring them, and the reason is in the data.
+#
+# Measured on the frozen test set, as a share of the clean target's edge energy:
+#
+#     the degraded input keeps        21%   (7% worst case, 44% best)
+#     the *undegraded* composite keeps 41%  -- so the warp alone costs 59%
+#     a real rectified phone photo    109%
+#
+# Two things are wrong, and the larger one is geometric rather than photometric.
+#
+# **The page is rendered smaller than it is trained at.** A 1152x1536 canvas with
+# the page at 0.42-0.90 of its height puts the page at 645-1382 px tall, and the
+# training pair is rectified to 1448. Every sample is therefore *upsampled* into
+# the pair, by up to 2.2x, before a single degradation runs. Upsampling cannot
+# invent detail, so the target contains strokes the input never had — and the only
+# way to score well on that task is to hallucinate plausible ink.
+#
+# **Nothing in the training set is ever sharp.** `downscale` starts at 2.0, so
+# even the mildest sample is halved and restored. Real photos span distant and
+# blurry through close and crisp; the model has seen only the blurry end, and a
+# sharp real photo is outside its training distribution entirely.
+#
+# So: a canvas the size of the real photos, and a downscale range that starts at
+# 1.0 so some samples arrive undamaged. The harsh end is kept — distant, shaky,
+# over-compressed photos are real too, and the point is to *span* what arrives,
+# not to move the whole distribution.
+#
+# Measured, as a share of the clean target's edge energy:
+#
+#     current                                     median 21%, max 44%
+#     canvas alone                                median 32%, max 63%
+#     canvas + downscale [1,3] + blur [0,1.6]     median 37%, max 73%
+#
+# Raising `page_scale` to 0.55-0.95 was tried and dropped. It lifts the median
+# another 7 points but *lowers* the maximum, and it is the one change that would
+# hurt the corner detector: `page_scale` lives in the shared `synth:` block, so
+# narrowing it would take away the distant, small-in-frame pages that detector has
+# to survive. The canvas and the downscale floor do the work without that cost,
+# and both are improvements for the corner task too.
+#
+# **The cost is real and worth stating.** A 1920x2560 canvas is 2.8x the pixels of
+# 1152x1536 and the loop is already fed by the CPU, so generation runs about 2.2x
+# slower — roughly 5 hours for 30 epochs instead of 2.4. It also changes the
+# generator, so `scripts/freeze_eval_sets.py --force` has to run and **every
+# number measured before this is no longer comparable**: the baseline and the
+# sharpness ablation both have to be re-run to compare against anything trained
+# with it.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_realistic
+
+data:
+  # As large as the real phone photos, so the page is not systematically
+  # upsampled into the training pair. This is the change that matters most, and
+  # it is equally right for the corner detector, which is also asked to
+  # generalise from 1152x1536 composites to 1920x2560 photographs.
+  canvas: [1920, 2560]
+
+degradation:
+  # Starting at 1.0 rather than 2.0 is the point: some samples now arrive with
+  # their resolution intact, which is what a close, steady photo looks like.
+  downscale: [1.0, 3.0]
+  blur_sigma: [0.0, 1.6]

@@ -1,0 +1,28 @@
+# The enhancement network, first version  (brief §3)
+#
+# Degraded rectified page in, clean scan out. No dropout, no weight decay, no
+# other explicit regularisation — the brief asks for that here, and the later
+# regularisation study needs a baseline that differs from it by dropout alone.
+#
+#   python train.py --config configs/enhance.yaml
+#   python evaluate.py --config configs/enhance.yaml
+#
+# Everything not written here is inherited from base.yaml, so the ablations that
+# sit beside this file differ by exactly the lines they are about.
+
+_base_: base.yaml
+
+task: enhance
+
+run:
+  name: enhance_baseline
+  notes: >
+    Baseline U-Net with skip connections, direct sigmoid output,
+    L1 + MS-SSIM + Sobel loss.
+
+log:
+  # Steer on PSNR rather than on the loss. The loss is a weighted blend chosen by
+  # this project; PSNR is the metric the report is judged on and is comparable
+  # across the loss ablation, where the loss itself is not.
+  keep_best_on: val_psnr
+  best_mode: max

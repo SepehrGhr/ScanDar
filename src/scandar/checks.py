@@ -558,75 +558,218 @@ def check_frozen_sets() -> list[Result]:
     from .synth import build_sources
 
     results = []
-    for split in ("val", "test"):
-        directory = paths.data / "frozen" / split
-        manifest_path = directory / "manifest.json"
-        if not manifest_path.exists():
-            results.append(
-                Result(
-                    f"frozen {split}",
-                    WARN,
-                    "not built yet — run `python scripts/freeze_eval_sets.py`",
+    for task in ("enhance", "corner"):
+        for split in ("train", "val", "test"):
+            label = f"frozen {task}/{split}"
+            directory = paths.frozen_set(task, split)
+            manifest_path = directory / "manifest.json"
+            if not manifest_path.exists():
+                results.append(
+                    Result(label, WARN, "not built yet — run `python scripts/freeze_eval_sets.py`")
                 )
-            )
-            continue
+                continue
 
-        manifest = read_json(manifest_path)
-        entries = manifest["samples"]
-        missing = [e["photo"] for e in entries if not (directory / e["photo"]).exists()]
-        if missing:
-            results.append(
-                Result(f"frozen {split}", FAIL, f"{len(missing)} photo(s) missing: {_sample(missing)}")
-            )
-            continue
-
-        # Regenerate a few samples from their keys and compare the encoded bytes.
-        # Byte equality is the strongest form of this check and the cheapest: it
-        # catches a change anywhere in the generator, including one that leaves the
-        # corner labels untouched and only moves the pixels.
-        try:
-            import cv2
-
-            from .config import load_config
-            from .prepare import FROZEN_JPEG_QUALITY
-
-            config = load_config(paths.repo / "configs" / "base.yaml")
-            sources = build_sources(config, split, task="corner")
-            mismatched = []
-            for index in _spread(len(entries), 3):
-                entry = entries[index]
-                rebuilt = sources.compose(rng_for("frozen", split, manifest["seed"], index))
-                ok, encoded = cv2.imencode(
-                    ".jpg",
-                    cv2.cvtColor(rebuilt.photo, cv2.COLOR_RGB2BGR),
-                    [cv2.IMWRITE_JPEG_QUALITY, FROZEN_JPEG_QUALITY],
+            manifest = read_json(manifest_path)
+            entries = manifest["samples"]
+            missing = [e["photo"] for e in entries if not (directory / e["photo"]).exists()]
+            if missing:
+                results.append(
+                    Result(label, FAIL, f"{len(missing)} photo(s) missing: {_sample(missing)}")
                 )
-                if not ok or encoded.tobytes() != (directory / entry["photo"]).read_bytes():
-                    mismatched.append(entry["id"])
-        except Exception as exc:  # noqa: BLE001 - report rather than crash the report
-            results.append(Result(f"frozen {split}", WARN, f"could not verify: {exc}"))
-            continue
+                continue
 
-        if mismatched:
-            results.append(
-                Result(
-                    f"frozen {split}",
-                    FAIL,
-                    f"{', '.join(mismatched)} no longer regenerate byte-identically — the "
-                    "generator has changed since this set was frozen, so numbers measured on "
-                    "it are not comparable with new ones. Re-freeze it with --force",
+            if manifest.get("task", "corner") != task:
+                results.append(
+                    Result(
+                        label,
+                        FAIL,
+                        f"holds {manifest.get('task', 'corner')!r} samples — the two tasks are "
+                        "generated from different worlds and cannot share a set",
+                    )
                 )
-            )
-        else:
-            results.append(
-                Result(
-                    f"frozen {split}",
-                    PASS,
-                    f"{len(entries)} samples, seed {manifest['seed']}, spot-checked "
-                    "byte-identical on regeneration",
+                continue
+
+            # The enhancement pairs are only valid if none of the corner-only
+            # options fired: a tinted or curled page has no clean target to be
+            # scored against, and the model would be measured on a job it was
+            # never trained to do.
+            if task == "enhance":
+                contaminated = [
+                    e["id"]
+                    for e in entries
+                    if e["params"]["page"].get("tint") or e["params"]["page"].get("curl")
+                ]
+                if contaminated:
+                    results.append(
+                        Result(
+                            label,
+                            FAIL,
+                            f"{len(contaminated)} sample(s) carry a page tint or curl that the "
+                            f"clean target does not: {_sample(contaminated)}. Re-freeze with "
+                            "--force",
+                        )
+                    )
+                    continue
+
+            # Regenerate a few samples from their keys and compare the encoded bytes.
+            # Byte equality is the strongest form of this check and the cheapest: it
+            # catches a change anywhere in the generator, including one that leaves the
+            # corner labels untouched and only moves the pixels.
+            try:
+                import cv2
+
+                from .config import load_config
+                from .prepare import FROZEN_JPEG_QUALITY
+
+                config = load_config(paths.repo / "configs" / "base.yaml")
+                sources = build_sources(config, split, task=task)
+                mismatched = []
+                for index in _spread(len(entries), 3):
+                    entry = entries[index]
+                    rebuilt = sources.compose(rng_for("frozen", split, manifest["seed"], index))
+                    ok, encoded = cv2.imencode(
+                        ".jpg",
+                        cv2.cvtColor(rebuilt.photo, cv2.COLOR_RGB2BGR),
+                        [cv2.IMWRITE_JPEG_QUALITY, FROZEN_JPEG_QUALITY],
+                    )
+                    if not ok or encoded.tobytes() != (directory / entry["photo"]).read_bytes():
+                        mismatched.append(entry["id"])
+            except Exception as exc:  # noqa: BLE001 - report rather than crash the report
+                results.append(Result(label, WARN, f"could not verify: {exc}"))
+                continue
+
+            if mismatched:
+                results.append(
+                    Result(
+                        label,
+                        FAIL,
+                        f"{', '.join(mismatched)} no longer regenerate byte-identically — the "
+                        "generator has changed since this set was frozen, so numbers measured on "
+                        "it are not comparable with new ones. Re-freeze it with --force",
+                    )
                 )
-            )
+            else:
+                results.append(
+                    Result(
+                        label,
+                        PASS,
+                        f"{len(entries)} samples, seed {manifest['seed']}, spot-checked "
+                        "byte-identical on regeneration",
+                    )
+                )
     return results
+
+
+def check_models() -> list[Result]:
+    """The network's two load-bearing properties, verified rather than assumed."""
+    import numpy as np
+    import torch
+
+    from .config import load_config
+    from .model import build_model, count_parameters
+
+    results = []
+    config = load_config(paths.repo / "configs" / "enhance.yaml")
+    model = build_model(config).eval()
+    parameters = count_parameters(model)
+
+    patch = int(config.data.patch_size)
+    page = tuple(int(v) for v in config.data.rect_size)  # width, height
+
+    # Training happens on patches and inference on whole pages, which is only
+    # possible because the network is fully convolutional. A page is also not a
+    # multiple of the downsampling factor, so this is where internal padding gets
+    # checked too.
+    problems = []
+    with torch.no_grad():
+        for width, height in ((patch, patch), page):
+            out = model(torch.rand(1, 3, height, width))
+            if tuple(out.shape) != (1, 3, height, width):
+                problems.append(f"{width}x{height} came back as {tuple(out.shape)[::-1]}")
+            elif float(out.min()) < 0.0 or float(out.max()) > 1.0:
+                problems.append(f"{width}x{height} left [0, 1]")
+
+    results.append(
+        Result(
+            "enhancement model",
+            FAIL if problems else PASS,
+            "; ".join(problems)
+            if problems
+            else f"{type(model).__name__}, {parameters:,} parameters, "
+            f"{patch}² patches and {page[0]}x{page[1]} pages both in [0, 1]",
+        )
+    )
+
+    # The corner detectors are not built yet; when they are, they are checked
+    # here alongside this one.
+
+    # Metric identities. A similarity measure that does not return its maximum
+    # for an image against itself is broken in a way no training run reveals.
+    from .losses import ms_ssim, sobel_loss
+    from .metrics import psnr, ssim_metric
+
+    rng = np.random.default_rng(0)
+    image = torch.from_numpy(rng.random((2, 3, 128, 128), dtype=np.float32))
+    noisy = (image + 0.1 * torch.randn_like(image)).clamp(0, 1)
+
+    identities = {
+        "ssim(x, x) = 1": abs(float(ssim_metric(image, image)) - 1.0) < 1e-5,
+        "ms-ssim(x, x) = 1": abs(float(ms_ssim(image, image)) - 1.0) < 1e-5,
+        "sobel(x, x) = 0": float(sobel_loss(image, image)) == 0.0,
+        "psnr(x, x) = inf": not np.isfinite(float(psnr(image, image))),
+        "noise scores worse": float(ssim_metric(image, noisy)) < 1.0
+        and float(psnr(image, noisy)) < 60.0,
+    }
+    broken = [name for name, ok in identities.items() if not ok]
+    results.append(
+        Result(
+            "metric identities",
+            FAIL if broken else PASS,
+            "; ".join(broken) if broken else ", ".join(identities),
+        )
+    )
+    return results
+
+
+def check_training_step() -> list[Result]:
+    """Can the loop actually learn? One batch, memorised, on the CPU.
+
+    The classic check for a broken training loop: a network that cannot fit a
+    single pair has a plumbing bug — a detached graph, a target that is really
+    the input, an optimiser holding no parameters — and no amount of data fixes
+    any of those.
+    """
+    import torch
+
+    from .losses import CombinedRestorationLoss
+    from .model import DocUNet
+
+    torch.manual_seed(0)
+    model = DocUNet(base=8, depth=2)
+    criterion = CombinedRestorationLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
+
+    inputs = torch.rand(2, 3, 64, 64)
+    targets = (inputs * 0.5 + 0.25).clamp(0, 1)
+
+    first = None
+    for _ in range(150):
+        loss, _ = criterion(model(inputs), targets)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        first = float(loss) if first is None else first
+
+    final = float(loss)
+    learned = final < 0.4 * first
+    return [
+        Result(
+            "overfit one batch",
+            PASS if learned else FAIL,
+            f"loss {first:.3f} -> {final:.3f} in 150 steps"
+            + ("" if learned else " — the loop is not learning"),
+        )
+    ]
 
 
 def _spread(count: int, wanted: int) -> list[int]:
@@ -687,6 +830,8 @@ CHECKS = (
     ("synthetic generator", check_generator),
     ("dataset contracts", check_dataset_tensors),
     ("derived: frozen evaluation sets", check_frozen_sets),
+    ("models and metrics", check_models),
+    ("training loop", check_training_step),
 )
 
 _SYMBOL = {PASS: "✓", WARN: "!", FAIL: "✗"}

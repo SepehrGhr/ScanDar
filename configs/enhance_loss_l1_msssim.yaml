@@ -1,0 +1,16 @@
+# Loss ablation: L1 + MS-SSIM  (brief §3.2)
+#
+# Adds a structural term scored at five scales. Isolates how much of the combined
+# loss's advantage comes from structure and how much from the gradient term that
+# the baseline config adds on top.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_loss_l1_msssim
+
+loss:
+  l1: 1.0
+  mse: 0.0
+  msssim: 0.5
+  sobel: 0.0

@@ -1,0 +1,15 @@
+# Architecture ablation: the same U-Net with the skip connections removed
+# (brief §3.1)
+#
+# The brief states that thin text strokes will not survive the bottleneck without
+# skip connections. This run is how that claim gets demonstrated rather than
+# repeated: identical encoder, decoder, loss, schedule and data — the decoder
+# simply never sees the encoder's feature maps.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_no_skips
+
+model:
+  skips: false

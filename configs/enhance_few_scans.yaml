@@ -1,0 +1,16 @@
+# The brief's §3.2 option: many degradations of few scans, or few degradations of
+# many?
+#
+# The generator makes the two directly comparable — the step count, the loss, the
+# schedule and the model are identical, and only the pool of source scans shrinks,
+# from 40 to 8. Each of those eight is then seen five times as often, under five
+# times as many different degradations. Whether the model would rather have
+# variety in the *documents* or variety in the *damage* is the finding.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_few_scans
+
+data:
+  train_scan_limit: 8

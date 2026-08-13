@@ -1,0 +1,36 @@
+# Architecture ablation: 512x512 training patches instead of 256x256
+#
+# Note what this does and does not change. The page is still rectified at
+# 1024x1448, so a pen stroke is exactly as many pixels wide as before — this
+# widens the *window* onto the page, it does not sharpen anything. What it buys
+# is context: a bigger fraction of a smooth illumination gradient inside one
+# sample, and a larger share of output pixels whose 189x189 receptive field falls
+# entirely on real page rather than partly on the patch's replicated border
+# (about 44% of them at 512, against 11% at 256).
+#
+# Whether that is worth having is a measurable question, which is why this is a
+# config rather than an opinion. Compare its test PSNR/SSIM against
+# `enhance_baseline`; both are scored on the same frozen pages.
+#
+# The batch is split four ways with gradient accumulation because 512² at batch
+# 16 does not fit in 6 GB — measured, it runs out of memory. Four micro-batches
+# of four keep the *effective* batch at 16, so this run differs from the baseline
+# by patch size alone.
+#
+# It is much cheaper than the arithmetic suggests. Four times the pixels per step
+# is four times the *GPU* work, but the loop is fed by the CPU and the GPU idles
+# most of the run, so most of that extra work lands in time that was being wasted:
+# measured end to end, 15.6 samples/s against the baseline's 21.0, about 1.35x the
+# wall clock rather than 4x.
+
+_base_: enhance.yaml
+
+run:
+  name: enhance_patch512
+
+data:
+  patch_size: 512
+
+train:
+  batch_size: 4
+  grad_accum: 4
