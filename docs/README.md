@@ -9,10 +9,11 @@ project: what it is for, how it does its job, and which decisions were deliberat
 | [The synthetic generator](synthetic-generator.md) | How a clean scan becomes a labelled photo of a page on a desk, and how the training pairs are derived from it. |
 | [The degradation pipeline](degradation-pipeline.md) | The nine stages that turn a clean composite into something that looks like a phone photo, built from OpenCV primitives only. |
 | [Datasets, splits and frozen sets](datasets-and-splits.md) | What a training loop actually receives, how the data is split, and why validation and test are written to disk. |
+| [The enhancement network](enhancement-network.md) | The architecture, why it trains on patches, the loss that keeps text sharp, how training and evaluation work, and what the ablations are set up to answer. |
 
-Not yet built: the models, the losses and metrics, the training loop, evaluation, the inference
-pipelines and the end-to-end scanner. The status table in the [top-level README](../README.md) is kept
-honest.
+Not yet built: the two corner detectors and their metrics, the OCR comparison against a commercial
+scanning app, and the end-to-end scanner. The status table in the
+[top-level README](../README.md) is kept honest.
 
 ## The idea in one picture
 
@@ -59,15 +60,23 @@ scanner *(brief §1.3)*.
 | `src/scandar/backgrounds.py` | Real background photos and five procedural textures |
 | `src/scandar/synth.py` | Placing the page and compositing it — `compose_sample` |
 | `src/scandar/datasets.py` | The PyTorch datasets and their tensor contracts |
+| `src/scandar/model.py` | Every architecture — the brief names this file explicitly |
+| `src/scandar/losses.py` | SSIM, MS-SSIM, the Sobel term and the combination they add up to |
+| `src/scandar/metrics.py` | PSNR and SSIM for the report, and the accumulator that gives them error bars |
+| `src/scandar/train.py` | One config-driven trainer for every model in the project |
+| `src/scandar/evaluate.py` | The results table, with the do-nothing baseline beside it |
+| `src/scandar/pipelines.py` | Inference on unseen data — tiled, blended, full resolution |
 | `src/scandar/checks.py` | The sanity checks |
 
 Scripts are thin and call into the package:
 
 ```bash
 python scripts/prepare_data.py      # cache the scans, write data/splits.json
-python scripts/freeze_eval_sets.py  # generate the frozen synthetic val/test sets
+python scripts/freeze_eval_sets.py  # generate the frozen synthetic evaluation sets
 python scripts/preview_synth.py     # render samples into outputs/previews to look at
-python scripts/sanity_checks.py     # verify the environment, the data and the generator
+python scripts/sanity_checks.py     # verify the environment, the data, the models and the loop
+python train.py    --config configs/enhance.yaml   # train
+python evaluate.py --config configs/enhance.yaml   # score
 ```
 
 ## Where to start reading the code
