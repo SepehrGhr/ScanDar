@@ -269,3 +269,184 @@ def test_a_landscape_frozen_sample_is_not_mistaken_for_a_mismatch():
 
     config = Config({"data": {"canvas": [1152, 1536]}, "_config_path": "x.yaml"})
     assert warn_if_frozen_set_is_stale(config, Landscape()) is True
+
+
+# --- what a batch means, per task ------------------------------------------
+def _corner_batch():
+    return {
+        "image": torch.rand(2, 3, 32, 32),
+        "input": torch.rand(2, 3, 32, 32),
+        "target": torch.rand(2, 3, 32, 32),
+        "corners": torch.rand(2, 4, 2),
+        "heatmaps": torch.rand(2, 4, 16, 16),
+    }
+
+
+def test_each_model_is_handed_the_tensors_it_needs():
+    """A coordinate model has no use for the heatmaps in the batch, and moving
+    four 128x128 maps per sample onto the GPU to be ignored is not free."""
+    from scandar.train import batch_inputs, batch_targets
+
+    batch = _corner_batch()
+    device = torch.device("cpu")
+    assert batch_inputs(batch, "restoration", device) is batch["input"]
+    assert batch_inputs(batch, "coords", device) is batch["image"]
+    assert batch_targets(batch, "coords", device) is batch["corners"]
+    assert set(batch_targets(batch, "heatmaps", device)) == {"corners", "heatmaps"}
+    assert batch_targets(batch, "restoration", device) is batch["target"]
+
+
+def test_the_metrics_follow_the_model():
+    """PSNR for a restoration, localisation error for a detector, and the heatmap
+    model scored through the same soft-argmax the pipeline reads it with."""
+    from scandar.train import quality_metrics
+
+    batch = _corner_batch()
+    restoration = quality_metrics("restoration", batch["input"], batch["target"])
+    assert set(restoration) == {"psnr", "ssim"}
+
+    coords = quality_metrics("coords", batch["corners"], batch["corners"], input_size=32)
+    assert float(coords["corner_err"].max()) == 0.0
+
+    heat = quality_metrics("heatmaps", batch["heatmaps"], batch, input_size=32)
+    assert "corner_err" in heat and heat["corner_err"].shape == (2,)
+
+
+def test_a_heatmap_size_that_disagrees_with_the_model_is_refused():
+    """Two config keys and a model attribute all have to agree, and nothing forces
+    them to. Caught before a single sample is generated, with all three numbers in
+    the message."""
+    from scandar.config import Config
+    from scandar.model import CornerHeatNet
+    from scandar.train import check_heatmap_size
+
+    model = CornerHeatNet(base=4, depth=2, out_stride=2)
+    ok = Config({"data": {"corner_input": 256, "heatmap_size": 128}})
+    check_heatmap_size(ok, model, "heatmaps")
+
+    wrong = Config({"data": {"corner_input": 256, "heatmap_size": 64}})
+    with pytest.raises(ValueError, match="heatmap_size=128"):
+        check_heatmap_size(wrong, model, "heatmaps")
+    # A model that does not emit heatmaps is not asked about them.
+    check_heatmap_size(wrong, DocUNet(base=4, depth=1), "restoration")
+
+
+# --- corner detection pipeline (brief §5.1) --------------------------------
+def _page_photo(quad=None):
+    """A bright page on a dark surface — what the classical detector is for."""
+    import cv2
+    import numpy as np
+
+    photo = np.full((600, 800, 3), 60, dtype=np.uint8)
+    quad = np.float32([[150, 110], [650, 140], [620, 500], [130, 460]]) if quad is None else quad
+    cv2.fillConvexPoly(photo, quad.astype(np.int32), (238, 236, 230))
+    return cv2.GaussianBlur(photo, (5, 5), 0), quad
+
+
+class _FixedDetector(torch.nn.Module):
+    """A stand-in detector that answers whatever it was constructed with."""
+
+    output_kind = "coords"
+
+    def __init__(self, corners):
+        super().__init__()
+        self.register_parameter("unused", torch.nn.Parameter(torch.zeros(1)))
+        self.corners = torch.tensor(corners, dtype=torch.float32)[None]
+
+    def forward(self, x):
+        return self.corners
+
+
+def test_detect_corners_maps_its_answer_back_onto_the_photo():
+    """Step 3 of the brief's §5.1, and the one it warns about: a coordinate
+    scaled by the wrong factor is a wrong label that looks like a bad model."""
+    from scandar.pipelines import detect_corners
+
+    photo, _ = _page_photo()
+    normalised = [[0.2, 0.25], [0.8, 0.25], [0.8, 0.75], [0.2, 0.75]]
+    result = detect_corners(photo, _FixedDetector(normalised), input_size=64)
+
+    assert result["source"] == "model"
+    assert result["corners"].shape == (4, 2)
+    # (x + 0.5) / W is the convention the labels are stored in, so 0.2 of an
+    # 800-pixel photo is 159.5, not 160.
+    assert result["corners"][0].tolist() == pytest.approx([159.5, 149.5], abs=0.01)
+    assert result["normalised"].flatten().tolist() == pytest.approx(
+        [value for corner in normalised for value in corner], abs=1e-4
+    )
+
+
+def test_a_degenerate_prediction_falls_back_to_the_classical_detector():
+    """The guardrail. Four points that are not a page must not become a
+    homography — the rectification would smear the page across the output."""
+    from scandar.geometry import corner_errors
+    from scandar.pipelines import detect_corners
+
+    photo, quad = _page_photo()
+    collapsed = [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]]
+    result = detect_corners(photo, _FixedDetector(collapsed), input_size=64)
+
+    assert result["source"] == "classical"
+    assert result["problem"]  # and it says what was wrong with the model's answer
+    assert float(corner_errors(result["corners"], quad).mean()) < 15
+
+
+def test_the_last_resort_is_the_frame_rather_than_an_exception():
+    """A demonstration in front of the teaching staff should degrade to something
+    a human can see and correct, not to a traceback."""
+    import numpy as np
+
+    from scandar.pipelines import detect_corners
+
+    noise = (np.random.default_rng(0).random((120, 160, 3)) * 255).astype(np.uint8)
+    collapsed = [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]]
+    result = detect_corners(noise, _FixedDetector(collapsed), input_size=64, fallback=False)
+    assert result["source"] == "frame"
+    assert result["corners"].tolist() == [[0, 0], [159, 0], [159, 119], [0, 119]]
+
+
+def test_the_classical_detector_finds_a_page_on_a_desk():
+    from scandar.geometry import corner_errors, order_corners
+    from scandar.pipelines import classical_corners
+
+    photo, quad = _page_photo()
+    found = classical_corners(photo)
+    assert found is not None
+    assert float(corner_errors(found, order_corners(quad)).max()) < 15
+
+
+def test_a_heatmap_detector_comes_back_with_its_maps_and_a_confidence():
+    """The pipeline reads either formulation identically, and hands back what
+    only a heatmap model can offer: how sure it was."""
+    from scandar.model import CornerHeatNet
+    from scandar.pipelines import detect_corners
+
+    photo, _ = _page_photo()
+    result = detect_corners(photo, CornerHeatNet(base=4, depth=2).eval(), input_size=64)
+    assert result["kind"] == "heatmaps"
+    assert result["heatmaps"].shape == (4, 32, 32)
+    assert result["confidence"] is not None
+
+
+def test_the_overlay_labels_the_corners_and_leaves_the_photo_alone():
+    """A permuted quad is the failure this project is most exposed to, and four
+    anonymous dots look the same whichever order they are in."""
+    import numpy as np
+
+    from scandar.pipelines import draw_corners
+
+    photo, quad = _page_photo()
+    before = photo.copy()
+    overlay = draw_corners(photo, quad)
+    assert overlay.shape == photo.shape and overlay.dtype == photo.dtype
+    assert np.array_equal(photo, before)
+    assert not np.array_equal(overlay, photo)
+
+
+def test_detect_corners_refuses_something_that_is_not_a_photo():
+    import numpy as np
+
+    from scandar.pipelines import detect_corners
+
+    with pytest.raises(ValueError, match="RGB HWC"):
+        detect_corners(np.zeros((32, 32), dtype=np.uint8), None)

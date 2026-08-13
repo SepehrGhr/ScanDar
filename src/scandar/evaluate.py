@@ -27,11 +27,22 @@ Pages are restored through exactly the pipeline that runs at inference time —
 overlapping tiles, cosine-blended *(brief §3.4)* — so the table scores what the
 project actually ships rather than a more convenient variant of it.
 
-Not built yet: the corner-detection numbers (localisation error, the
-all-four-within-a-threshold success rate, quad IoU) and the OCR readability
-comparison against the commercial scanning app. Both arrive with the tasks they
-belong to; the OCR one also needs the reference scans and transcripts, which have
-not been captured yet.
+And the corner-detection table *(brief §5)*: mean localisation error in pixels
+and as a percentage of the image diagonal, the stricter all-four-within-a-
+threshold success rate swept into a PCK curve, and quad IoU as the proxy for what
+a corner error costs the rectification downstream. It carries its own no-model
+baseline, the way the restoration table does — the classical Canny detector, run
+on the very same 256x256 input the network sees. A learned detector that cannot
+beat a rectangle-finder from before neural networks is not earning its
+parameters either.
+
+Which table gets produced is decided by the model's ``output_kind``, so one
+command scores any checkpoint this project produces.
+
+Not built yet: the OCR readability comparison against the commercial scanning
+app, which needs the reference scans and the transcripts, and the real-photo
+corner numbers, which need the annotation export. None of the three has been
+captured yet.
 
 Tables are written to ``reports/tables/`` in both CSV and Markdown, so the report
 never contains a hand-copied number.
@@ -50,11 +61,18 @@ from .config import Config, load_config, parse_override
 from .datasets import frozen_dataset
 from .device import amp_enabled, describe_device, get_device, recommended_workers
 from .io import paths, write_json
-from .metrics import MetricAccumulator, psnr, ssim_metric
-from .model import clamp_image, load_model
+from .metrics import (
+    PCK_THRESHOLD_PCT,
+    MetricAccumulator,
+    corner_metrics,
+    pck_curve,
+    psnr,
+    ssim_metric,
+)
+from .model import clamp_image, corners_from_output, load_model
 from .pipelines import tiled_forward
 
-__all__ = ["evaluate_enhancement", "main"]
+__all__ = ["evaluate_enhancement", "evaluate_corners", "main"]
 
 SPLIT_LABELS = {"train": "Training", "val": "Validation", "test": "Test"}
 
@@ -147,6 +165,256 @@ def evaluate_enhancement(
             "per_sample": per_sample,
         }
     return results
+
+
+# ---------------------------------------------------------------------------
+# corner detection  (brief §5)
+# ---------------------------------------------------------------------------
+def evaluate_corners(
+    model,
+    config: Config,
+    splits=("train", "val", "test"),
+    device=None,
+    limit: int | None = None,
+    baseline: bool = True,
+    threshold_pct: float = PCK_THRESHOLD_PCT,
+    progress: bool = True,
+) -> dict:
+    """Score a corner detector on the frozen synthetic buckets *(brief §5)*.
+
+    Everything is measured in the detector's own 256x256 input space. That is the
+    only space in which two detectors, or two photographs of different sizes, are
+    comparable at all — and the percentage-of-diagonal column carries the number
+    over to any other resolution.
+
+    The classical detector runs on the identical resized input, not on the
+    original photo, so the baseline column answers "what does the network add to
+    what this input already gives away" rather than "what would a different
+    pipeline achieve".
+    """
+    import numpy as np
+
+    from .geometry import normalize_corners, order_corners
+    from .pipelines import classical_corners
+
+    device = device if device is not None else get_device()
+    workers = recommended_workers(config.train.get("num_workers", "auto"))
+    input_size = int(config.data.get("corner_input", 256))
+    kind = str(getattr(model, "output_kind", "coords"))
+    model.eval().to(device)
+
+    results: dict[str, dict] = {}
+    for split in splits:
+        dataset = frozen_dataset(config, split, task="corner", mode="page")
+        loader = DataLoader(
+            dataset,
+            batch_size=int(config.train.get("batch_size", 16)),
+            shuffle=False,
+            num_workers=workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+        scored = MetricAccumulator()
+        classical = MetricAccumulator()
+        per_sample: list[dict] = []
+        predicted_all: list[torch.Tensor] = []
+        target_all: list[torch.Tensor] = []
+        fallbacks = 0
+        seen = 0
+
+        for batch in loader:
+            if limit is not None:
+                room = limit - seen
+                if room <= 0:
+                    break
+                if room < len(batch["id"]):
+                    # Trim rather than round up to a whole batch: `--limit 20`
+                    # scoring 32 samples would be a quietly different experiment
+                    # from the one that was asked for.
+                    batch = {key: value[:room] for key, value in batch.items()}
+            images = batch["image"].to(device, non_blocking=True)
+            targets = batch["corners"].to(device)
+            with torch.no_grad():
+                outputs = model(images)
+            # The same extraction the pipeline ships, via the same function:
+            # scoring a heatmap model with a different read-back than the one it
+            # is deployed with measures a network nobody will ever run.
+            predicted = corners_from_output(outputs.float()).detach().cpu()
+            targets = targets.cpu()
+
+            metrics = corner_metrics(predicted, targets, size=input_size, threshold_pct=threshold_pct)
+            scored.update(metrics)
+            predicted_all.append(predicted)
+            target_all.append(targets)
+
+            for index in range(images.shape[0]):
+                row = {
+                    "id": batch["id"][index],
+                    "scan": batch["scan"][index],
+                    "corner_err": round(float(metrics["corner_err"][index]), 4),
+                    "corner_pct": round(float(metrics["corner_pct"][index]), 4),
+                    "corner_worst": round(float(metrics["corner_worst"][index]), 4),
+                    "pck": int(metrics["pck"][index]),
+                    "quad_iou": round(float(metrics["quad_iou"][index]), 4),
+                }
+                if baseline:
+                    photo = (
+                        images[index].cpu().numpy().transpose(1, 2, 0) * 255.0
+                    ).round().astype(np.uint8)
+                    found = classical_corners(photo, working_side=input_size)
+                    if found is None:
+                        fallbacks += 1
+                        # No detection is not a free pass: it is scored as the
+                        # whole frame, which is what a pipeline would be left
+                        # holding. Dropping the sample would flatter the baseline
+                        # by measuring it only where it succeeded.
+                        found = order_corners(
+                            np.array(
+                                [[0, 0], [input_size - 1, 0],
+                                 [input_size - 1, input_size - 1], [0, input_size - 1]],
+                                dtype=np.float32,
+                            )
+                        )
+                    guess = torch.from_numpy(
+                        normalize_corners(found, (input_size, input_size))
+                    )[None]
+                    classical.update(
+                        corner_metrics(guess, targets[index : index + 1], size=input_size,
+                                       threshold_pct=threshold_pct)
+                    )
+                    row["baseline_corner_err"] = round(
+                        float(classical.values["corner_err"][-1]), 4
+                    )
+                per_sample.append(row)
+            seen += images.shape[0]
+
+            if progress and seen % 100 < images.shape[0]:
+                print(
+                    f"  {split:<5} {seen:>4}/{limit or len(dataset)}"
+                    f"  error {scored.mean('corner_err'):.2f} px"
+                    f"  pck {scored.mean('pck'):.3f}"
+                )
+
+        predicted_all = torch.cat(predicted_all) if predicted_all else torch.zeros(0, 4, 2)
+        target_all = torch.cat(target_all) if target_all else torch.zeros(0, 4, 2)
+        results[split] = {
+            "n": len(per_sample),
+            "model": scored.summary(),
+            "baseline": classical.summary() if baseline else {},
+            "baseline_undetected": fallbacks,
+            "pck_curve": pck_curve(predicted_all, target_all, size=input_size),
+            "per_sample": per_sample,
+        }
+    return results
+
+
+def corner_table_rows(results: dict) -> list[dict]:
+    """One row per split per variant, long-form, which is what a CSV wants."""
+    rows = []
+    for split, entry in results.items():
+        variants = [("detector", entry["model"])]
+        if entry.get("baseline"):
+            variants.append(("classical baseline", entry["baseline"]))
+        for variant, scores in variants:
+            rows.append(
+                {
+                    "split": SPLIT_LABELS.get(split, split),
+                    "variant": variant,
+                    "n": entry["n"],
+                    "corner_err_px": round(scores.get("corner_err", float("nan")), 3),
+                    "corner_err_std": round(scores.get("corner_err_std", float("nan")), 3),
+                    "corner_err_pct": round(scores.get("corner_pct", float("nan")), 4),
+                    "worst_corner_px": round(scores.get("corner_worst", float("nan")), 3),
+                    "pck": round(scores.get("pck", float("nan")), 4),
+                    "quad_iou": round(scores.get("quad_iou", float("nan")), 4),
+                }
+            )
+    return rows
+
+
+def corner_markdown_table(results: dict, title: str = "", threshold_pct=PCK_THRESHOLD_PCT) -> str:
+    """The corner comparison table, with the no-model baseline beneath each row."""
+    lines = []
+    if title:
+        lines += [f"### {title}", ""]
+    lines += [
+        f"| Split | corner error (px @256) | % of diagonal | PCK@{threshold_pct:g}% | quad IoU |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for split, entry in results.items():
+        model = entry["model"]
+        lines.append(
+            f"| {SPLIT_LABELS.get(split, split)} "
+            f"| {model.get('corner_err', float('nan')):.2f} ± "
+            f"{model.get('corner_err_std', float('nan')):.2f} "
+            f"| {model.get('corner_pct', float('nan')):.2f}% "
+            f"| {model.get('pck', float('nan')):.3f} "
+            f"| {model.get('quad_iou', float('nan')):.4f} |"
+        )
+        if entry.get("baseline"):
+            base = entry["baseline"]
+            lines.append(
+                f"| *— classical baseline* "
+                f"| *{base.get('corner_err', float('nan')):.2f}* "
+                f"| *{base.get('corner_pct', float('nan')):.2f}%* "
+                f"| *{base.get('pck', float('nan')):.3f}* "
+                f"| *{base.get('quad_iou', float('nan')):.4f}* |"
+            )
+    lines += [
+        "",
+        "Mean Euclidean distance between predicted and true corners, averaged over the four "
+        "corners of each photo and then over photos, measured in the detector's own 256x256 "
+        f"input space. PCK is the fraction of photos where **all four** corners land within "
+        f"{threshold_pct:g}% of the image diagonal. The baseline rows are Canny + findContours "
+        "+ approxPolyDP on the identical input, with an undetected page scored as the whole "
+        "frame.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_corner_tables(results: dict, name: str, directory: Path | None = None) -> dict[str, Path]:
+    """CSV, Markdown, the PCK curve and the per-sample scores."""
+    import csv
+
+    directory = Path(directory or paths.tables)
+    directory.mkdir(parents=True, exist_ok=True)
+    written = {}
+
+    rows = corner_table_rows(results)
+    csv_path = directory / f"{name}_corners.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    written["csv"] = csv_path
+
+    markdown_path = directory / f"{name}_corners.md"
+    markdown_path.write_text(corner_markdown_table(results, title=name), encoding="utf-8")
+    written["markdown"] = markdown_path
+
+    # The curve, not just the single threshold: the crossing point between two
+    # detectors is more informative than either's score at a threshold someone
+    # chose, and choosing it after seeing the numbers is how a comparison stops
+    # being one.
+    curve = [dict(row, split=split) for split, e in results.items() for row in e["pck_curve"]]
+    if curve:
+        curve_path = directory / f"{name}_pck_curve.csv"
+        with open(curve_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(curve[0]))
+            writer.writeheader()
+            writer.writerows(curve)
+        written["pck_curve"] = curve_path
+
+    per_sample = [dict(row, split=split) for split, e in results.items() for row in e["per_sample"]]
+    if per_sample:
+        detail_path = directory / f"{name}_corners_per_sample.csv"
+        with open(detail_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(per_sample[0]))
+            writer.writeheader()
+            writer.writerows(per_sample)
+        written["per_sample"] = detail_path
+
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +529,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=None, help="score only the first N pages")
     parser.add_argument("--tile", type=int, default=512, help="tile size; 0 runs one whole-page pass")
     parser.add_argument("--overlap", type=int, default=192)
+    parser.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="skip the classical corner detector's baseline column",
+    )
     parser.add_argument("--out", default=None, help="table directory (default reports/tables)")
     parser.add_argument("--name", default=None, help="table name (default: the run name)")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -276,8 +549,42 @@ def main(argv: list[str] | None = None) -> int:
         config.set_path(key, value)
 
     name = args.name or checkpoint_path.parent.name
+    kind = str(getattr(model, "output_kind", "restoration"))
     print(f"checkpoint: {checkpoint_path}")
     print(f"device    : {describe_device(device)}")
+
+    if kind in ("coords", "heatmaps"):
+        input_size = int(config.data.get("corner_input", 256))
+        print(f"detector  : {type(model).__name__}, {kind} at {input_size}x{input_size}\n")
+        corner_results = evaluate_corners(
+            model,
+            config,
+            splits=tuple(args.splits),
+            device=device,
+            limit=args.limit,
+            baseline=not args.no_baseline,
+        )
+        print("\n" + corner_markdown_table(corner_results))
+        written = write_corner_tables(corner_results, name, directory=args.out)
+        for label, path in written.items():
+            print(f"{label:<10}: {path}")
+        write_json(
+            checkpoint_path.parent / "evaluation.json",
+            {
+                "checkpoint": str(checkpoint_path),
+                "task": "corner",
+                "input_size": input_size,
+                "splits": {
+                    split: {
+                        key: entry[key]
+                        for key in ("n", "model", "baseline", "baseline_undetected", "pck_curve")
+                    }
+                    for split, entry in corner_results.items()
+                },
+            },
+        )
+        return 0
+
     print(f"pages     : {'whole-page pass' if not args.tile else f'{args.tile}px tiles, {args.overlap}px overlap'}\n")
 
     results = evaluate_enhancement(

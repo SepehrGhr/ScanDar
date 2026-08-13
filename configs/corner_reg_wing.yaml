@@ -1,0 +1,30 @@
+# Coordinate ablation: the Wing loss instead of L1  (brief §5)
+#
+# L1 gives a 40-pixel error and a 1-pixel error exactly the same gradient. That is
+# the right behaviour early, when the detector is still finding the page, and the
+# wrong one late, when every remaining sample is nearly right and nothing is
+# pushing it to be precisely right. The Wing loss keeps L1 out past its width and
+# switches to a logarithm inside it, where the gradient *grows* as the error
+# shrinks.
+#
+# w = 10 px and eps = 2 px of the 256-pixel input, which is the published pair and
+# happens to sit exactly where this task's errors are expected to end up: the
+# logarithmic region covers the entire range the detector will be working in by
+# the second half of the run.
+#
+# Nothing else changes, so the comparison is about the loss shape alone. If the
+# Wing loss wins here it should be tried on the heatmap detector's auxiliary
+# coordinate term too.
+
+_base_: corner_reg.yaml
+
+run:
+  name: corner_reg_wing
+
+loss:
+  name: corner
+  coord_l1: 0.0
+  coord_wing: 1.0
+  wing_width: 10.0
+  wing_curvature: 2.0
+  coord_scale: 256.0        # the pixel space w and eps are expressed in

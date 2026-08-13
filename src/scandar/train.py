@@ -1,11 +1,13 @@
 """Training loop.  *(brief §3.2)*
 
-The brief names this file explicitly. One config-driven trainer serves every
-model in the project — the enhancement network now, both corner detectors when
-they are built — because they differ in their data, loss and metrics, not in the
-shape of the loop.
+The brief names this file explicitly. One config-driven trainer serves every model
+in the project — the enhancement network and both corner detectors — because they
+differ in their data, their loss and their metrics, not in the shape of the loop.
+What varies is read off the model's ``output_kind``: which tensors come out of a
+batch, what the loss is handed, and which numbers are worth printing.
 
     python train.py --config configs/enhance.yaml
+    python train.py --config configs/corner_heat.yaml
     python train.py --config configs/enhance.yaml --set train.epochs=20 run.name=quick
 
 What it does, and why:
@@ -35,9 +37,11 @@ What it does, and why:
 more than a training step does, so this loop is fed by the CPU, not limited by
 the GPU. ``patches_per_photo`` amortises one composited photo over several
 patches, which is worth about four times the throughput and is the reason the
-loader must not shuffle. The measured rate is printed at the start of every run
-and logged per epoch — it is the number that decides how many epochs fit in an
-evening.
+loader must not shuffle. **Corner detection has no such amortisation** — one
+composited photo *is* one sample — so it runs at the generator's raw rate and a
+corner epoch costs several times what an enhancement epoch of the same length
+costs. The measured rate is printed at the start of every run and logged per
+epoch; it is the number that decides how many epochs fit in an evening.
 """
 
 from __future__ import annotations
@@ -57,12 +61,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from .config import Config, load_config
-from .datasets import SyntheticEnhanceDataset, frozen_dataset
+from .datasets import SyntheticCornerDataset, SyntheticEnhanceDataset, frozen_dataset
 from .device import amp_enabled, describe_device, get_device, recommended_workers
 from .io import paths, write_json
 from .losses import build_loss
-from .metrics import MetricAccumulator, psnr, ssim_metric
-from .model import build_model, clamp_image, count_parameters
+from .metrics import MetricAccumulator, corner_metrics, psnr, ssim_metric
+from .model import build_model, clamp_image, corners_from_output, count_parameters
 from .prepare import ScanBank, load_splits
 from .seed import seed_everything, worker_init_fn
 from .synth import build_sources
@@ -155,12 +159,22 @@ def restore_rng_state(state: dict) -> None:
 # ---------------------------------------------------------------------------
 # data
 # ---------------------------------------------------------------------------
-def build_train_dataset(config: Config, task: str) -> SyntheticEnhanceDataset:
-    """The infinite generator, sized so one epoch is ``iters_per_epoch`` steps."""
-    if task != "enhance":
+def build_train_dataset(config: Config, task: str):
+    """The infinite generator, sized so one epoch is ``iters_per_epoch`` steps.
+
+    The two tasks draw from the same generator but not from the same *world*: the
+    corner detector's samples include tinted and dark page stock, a second sheet
+    of paper in frame and pages that will not lie flat, none of which the
+    enhancement network can be trained against because its target is the flat
+    clean scan. ``build_sources`` strips them by task, structurally.
+
+    A corner sample is also one composited photo, where an enhancement sample is
+    one crop of one. There is no amortisation to be had — the photo *is* the
+    sample — so corner training runs at the generator's raw rate.
+    """
+    if task not in ("enhance", "corner"):
         raise NotImplementedError(
-            f"task {task!r} is not implemented yet — only the enhancement network is built. "
-            "The corner detectors come with the corner-detection task."
+            f"task {task!r} is not implemented — expected 'enhance' or 'corner'"
         )
 
     data = config.data
@@ -176,6 +190,17 @@ def build_train_dataset(config: Config, task: str) -> SyntheticEnhanceDataset:
     limit = data.get("train_scan_limit")
     if limit:
         sources.scans = ScanBank(sources.scans.ids[: int(limit)], directory=sources.scans.directory)
+
+    if task == "corner":
+        return SyntheticCornerDataset(
+            sources,
+            "train",
+            length=samples,
+            input_size=int(data.get("corner_input", 256)),
+            heatmap_size=int(data.get("heatmap_size", 128)),
+            heatmap_sigma=float(data.get("heatmap_sigma", 3.0)),
+            seed=int(config.project.seed),
+        )
 
     return SyntheticEnhanceDataset(
         sources,
@@ -221,6 +246,38 @@ def warn_if_frozen_set_is_stale(config: Config, dataset) -> bool:
     return False
 
 
+def check_heatmap_size(config: Config, model, kind: str) -> None:
+    """Refuse a heatmap model whose output size is not what the labels are drawn at.
+
+    ``corner_input`` and ``heatmap_size`` are config values and the model's
+    ``out_stride`` is another; nothing forces them to agree, and disagreeing costs
+    a shape error deep inside the loss at the first step — or worse, no error at
+    all if the numbers happen to broadcast. Checked before anything is generated,
+    where the message can name all three numbers.
+    """
+    if kind != "heatmaps":
+        return
+    stride = int(getattr(model, "out_stride", 1))
+    input_size = int(config.data.get("corner_input", 256))
+    wanted = int(config.data.get("heatmap_size", 128))
+    produced = input_size // stride
+    if produced != wanted:
+        raise ValueError(
+            f"the model emits {produced}x{produced} heatmaps from a {input_size}px input "
+            f"(out_stride {stride}), but the labels are drawn at {wanted}x{wanted}. "
+            f"Set data.heatmap_size={produced} or model.out_stride={input_size // wanted}"
+        )
+
+
+def _metric_summary(accumulator: MetricAccumulator, keys) -> str:
+    """The epoch line's metrics, each in the units it is read in."""
+    return "  ".join(
+        f"{key} {METRIC_FORMAT.get(key, '{:.4f}').format(accumulator.mean(key))}"
+        for key in keys
+        if key in accumulator
+    )
+
+
 def make_loader(dataset, config: Config, workers: int, shuffle: bool, drop_last: bool) -> DataLoader:
     """A DataLoader with the two settings this project cannot change.
 
@@ -247,26 +304,84 @@ def make_loader(dataset, config: Config, workers: int, shuffle: bool, drop_last:
 
 
 # ---------------------------------------------------------------------------
+# what a batch means, per task
+# ---------------------------------------------------------------------------
+#: How each metric is worth reading. Anything not named here gets four decimals.
+METRIC_FORMAT = {
+    "psnr": "{:.2f} dB",
+    "ssim": "{:.4f}",
+    "corner_err": "{:.2f} px",
+    "corner_worst": "{:.2f} px",
+    "corner_pct": "{:.2f}%",
+    "pck": "{:.3f}",
+    "quad_iou": "{:.4f}",
+}
+
+
+def batch_inputs(batch: dict, kind: str, device) -> torch.Tensor:
+    return batch["input" if kind == "restoration" else "image"].to(device, non_blocking=True)
+
+
+def batch_targets(batch: dict, kind: str, device):
+    """The labels this kind of model is scored against, on the training device.
+
+    A coordinate model is handed the coordinates and nothing else — the heatmaps
+    in the batch are four 128x128 maps per sample that it has no use for, and
+    there is no reason to move them across the bus to be ignored.
+    """
+    if kind == "restoration":
+        return batch["target"].to(device, non_blocking=True)
+    corners = batch["corners"].to(device, non_blocking=True)
+    if kind == "coords":
+        return corners
+    return {"corners": corners, "heatmaps": batch["heatmaps"].to(device, non_blocking=True)}
+
+
+def quality_metrics(kind: str, outputs, targets, input_size: int = 256) -> dict:
+    """Per-image metrics for the epoch's log line, in the units the report uses.
+
+    Per image, never per batch: a mean of batch means is not a mean when the last
+    batch is short, and the standard deviation the table quotes needs the
+    individual scores anyway.
+    """
+    if kind == "restoration":
+        predictions = clamp_image(outputs.float())
+        return {
+            "psnr": psnr(predictions, targets, reduction="none"),
+            "ssim": ssim_metric(predictions, targets, reduction="none"),
+        }
+
+    # Read through the one function the evaluation table and the inference
+    # pipeline also use, so the validation curve tracks the number that gets
+    # reported rather than a proxy for it. It measured six times too high when
+    # this was its own call site.
+    predicted = corners_from_output(outputs.float())
+    true = targets if kind == "coords" else targets["corners"]
+    return corner_metrics(predicted.detach(), true.float(), size=input_size)
+
+
+# ---------------------------------------------------------------------------
 # the loop
 # ---------------------------------------------------------------------------
-def evaluate_epoch(model, loader, criterion, device, use_amp: bool) -> MetricAccumulator:
-    """Score the frozen validation set: the same loss, plus PSNR and SSIM."""
+def evaluate_epoch(
+    model, loader, criterion, device, use_amp: bool, kind: str = "restoration",
+    input_size: int = 256,
+) -> MetricAccumulator:
+    """Score the frozen validation set: the same loss, plus the task's metrics."""
     model.eval()
     accumulator = MetricAccumulator()
     with torch.no_grad():
         for batch in loader:
-            inputs = batch["input"].to(device, non_blocking=True)
-            targets = batch["target"].to(device, non_blocking=True)
+            inputs = batch_inputs(batch, kind, device)
+            targets = batch_targets(batch, kind, device)
             with autocast_for(device, use_amp):
                 outputs = model(inputs)
             loss, parts = criterion(outputs, targets)
 
-            predictions = clamp_image(outputs.float())
             accumulator.add("loss", [float(loss)] * inputs.shape[0])
             for name, value in parts.items():
                 accumulator.add(name, [value] * inputs.shape[0])
-            accumulator.add("psnr", psnr(predictions, targets, reduction="none"))
-            accumulator.add("ssim", ssim_metric(predictions, targets, reduction="none"))
+            accumulator.update(quality_metrics(kind, outputs, targets, input_size))
     return accumulator
 
 
@@ -315,17 +430,27 @@ def train(config: Config, resume: str | None = None) -> Path:
     print(f"model     : {type(model).__name__}, {count_parameters(model):,} parameters")
     print(f"loss      : {criterion.extra_repr()}")
 
+    kind = str(getattr(model, "output_kind", "restoration"))
+    input_size = int(config.data.get("corner_input", 256))
+    check_heatmap_size(config, model, kind)
+
     train_dataset = build_train_dataset(config, task)
     train_dataset.sources.warm()
     scans = train_dataset.sources.scans
 
-    val_dataset = frozen_dataset(config, "val", task=task, mode="patch")
+    # Patch-level validation for restoration, so the two curves on the brief's
+    # graph are the same quantity; whole photos for corner detection, where a
+    # sample is a photo and there is nothing to crop.
+    val_dataset = frozen_dataset(
+        config, "val", task=task, mode="patch" if task == "enhance" else "page"
+    )
     warn_if_frozen_set_is_stale(config, val_dataset)
     train_loader = make_loader(train_dataset, config, workers, shuffle=False, drop_last=True)
     val_loader = make_loader(val_dataset, config, workers, shuffle=False, drop_last=False)
     print(
         f"data      : {len(scans)} train scans, {len(train_dataset)} samples/epoch, "
-        f"{len(val_dataset)} frozen val patches, {workers} worker(s)"
+        f"{len(val_dataset)} frozen val "
+        f"{'patches' if task == 'enhance' else 'photos'}, {workers} worker(s)"
     )
 
     # --- resume ------------------------------------------------------------
@@ -392,8 +517,8 @@ def train(config: Config, resume: str | None = None) -> Path:
 
         optimizer.zero_grad(set_to_none=True)
         for batch in train_loader:
-            inputs = batch["input"].to(device, non_blocking=True)
-            targets = batch["target"].to(device, non_blocking=True)
+            inputs = batch_inputs(batch, kind, device)
+            targets = batch_targets(batch, kind, device)
             seen += inputs.shape[0]
 
             if micro == 0:
@@ -434,8 +559,17 @@ def train(config: Config, resume: str | None = None) -> Path:
                 break
 
         train_seconds = time.time() - epoch_start
-        validation = evaluate_epoch(model, val_loader, criterion, device, use_amp)
+        validation = evaluate_epoch(
+            model, val_loader, criterion, device, use_amp, kind=kind, input_size=input_size
+        )
 
+        # Whatever the task measured beyond its loss terms, without a per-task
+        # table of column names that would have to be kept in step by hand.
+        quality = [
+            name
+            for name in validation.values
+            if name != "loss" and name not in criterion.active
+        ]
         row = {
             "epoch": epoch + 1,
             "step": global_step,
@@ -444,8 +578,7 @@ def train(config: Config, resume: str | None = None) -> Path:
             **{f"train_{name}": running.mean(name) for name in criterion.active},
             "val_loss": validation.mean("loss"),
             **{f"val_{name}": validation.mean(name) for name in criterion.active},
-            "val_psnr": validation.mean("psnr"),
-            "val_ssim": validation.mean("ssim"),
+            **{f"val_{name}": validation.mean(name) for name in quality},
             "samples_per_s": seen / max(1e-9, train_seconds),
             "train_seconds": round(train_seconds, 1),
             "val_seconds": round(time.time() - epoch_start - train_seconds, 1),
@@ -457,8 +590,8 @@ def train(config: Config, resume: str | None = None) -> Path:
         improved = current > best_value if higher_is_better else current < best_value
         print(
             f"  epoch {epoch + 1:>3}/{epochs}  train {row['train_loss']:.4f}"
-            f"  val {row['val_loss']:.4f}  psnr {row['val_psnr']:.2f} dB"
-            f"  ssim {row['val_ssim']:.4f}  {row['samples_per_s']:.1f} samples/s"
+            f"  val {row['val_loss']:.4f}  {_metric_summary(validation, quality)}"
+            f"  {row['samples_per_s']:.1f} samples/s"
             f"  [{train_seconds / 60:.1f} + {row['val_seconds'] / 60:.1f} min]"
             f"{'  *best*' if improved else ''}"
         )

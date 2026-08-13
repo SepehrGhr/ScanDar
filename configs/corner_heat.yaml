@@ -1,0 +1,44 @@
+# Corner detection, approach B: heatmap regression  (brief §5)
+#
+# The encoder-decoder from the enhancement network, emitting four Gaussian
+# heatmaps at 128x128 instead of a three-channel image at full size, trained with
+# a pixel-wise loss on the maps. Coordinates come back out through a soft-argmax,
+# so the extraction is sub-pixel and differentiable.
+#
+#   python train.py --config configs/corner_heat.yaml
+#   python evaluate.py --config configs/corner_heat.yaml
+#
+# The prediction about how this fares against direct regression is written down
+# in reports/PREDICTIONS.md, and was committed before either had trained.
+
+_base_: corner.yaml
+
+run:
+  name: corner_heat
+  notes: >
+    U-Net trunk with skip connections, 4 heatmaps at half the input resolution,
+    linear head, pixel-wise MSE on the maps. No dropout, no weight decay.
+
+model:
+  name: cornerheatnet
+  base: 32                  # 32/64/128/256 encoder, 512 bottleneck, as DocUNet
+  depth: 4
+  out_stride: 2             # 256 in, 128 out — must match data.heatmap_size
+  norm: batch
+  dropout: 0.0
+  head_activation: none     # linear, not sigmoid; see the class for why
+  skips: true
+
+loss:
+  name: corner
+  heatmap: 1.0
+  coord_l1: 0.0             # corner_heat_aux.yaml turns this one on
+  coord_l2: 0.0
+  coord_wing: 0.0
+
+  # A Gaussian of sigma 3 occupies about 60 of a 128x128 map's 16 384 cells, so
+  # "predict zero everywhere" scores respectably under a plain mean. It is
+  # normally still enough. If the loss flattens out early and the maps come back
+  # empty, raise this to weight the cells the blob covers — it is the first thing
+  # to try, before touching the learning rate.
+  positive_weight: 1.0

@@ -1,0 +1,69 @@
+# What both corner detectors share  (brief §5)
+#
+# Not runnable on its own — it carries no model. `corner_reg.yaml` and
+# `corner_heat.yaml` are the two experiments, and they inherit everything here so
+# that the comparison the brief asks for differs by the formulation and by
+# nothing else: same photos, same schedule, same optimiser, same seed.
+#
+# --- a note on what a corner sample costs ---------------------------------
+#
+# The enhancement network amortises one composited photo over eight training
+# patches. **A corner sample is one whole photo**, so there is nothing to
+# amortise and this task runs at the generator's raw rate — roughly an eighth of
+# the throughput the enhancement runs report.
+#
+# Which makes the canvas the lever that matters here, and it points the other way
+# than it does for the enhancement network. **The detector resizes every photo to
+# 256x256 before it sees anything**, so the canvas decides almost nothing about
+# the task and almost everything about the cost: compositing and degrading at
+# 1920x2560 does 2.8x the pixel work of 1152x1536 for a sample that is thrown
+# away down to 256 either way. The enhancement network needed the large canvas for
+# a concrete reason — its training pair is rectified at 1024x1448, so a small
+# canvas upsampled every page into the target and asked the model to invent
+# detail. Nothing of that applies to a task whose input is 256 pixels wide.
+#
+# So: 1152x1536, and the only thing given up is a little resampling fidelity in
+# the chain from page to network input. **Measured end to end through the real
+# training loop on the 3060 at batch 16: 6.5 samples/s for the regressor and 6.1
+# for the heatmap net**, against 2.3 photos/s for the enhancement run on the
+# larger canvas. The 48 000 samples below are almost exactly two hours per
+# detector; on the larger canvas they would have been six.
+#
+# The two detectors run at nearly the same rate despite one having 40% more
+# parameters, which is the same story the enhancement runs tell: the loop waits
+# on the CPU generating photos, not on the GPU consuming them.
+#
+# **The frozen corner buckets have to match.** Training on one canvas while
+# validating on another measures a distribution the model is not learning, and
+# the trainer warns when the two disagree. Before the first run:
+#
+#     python scripts/freeze_eval_sets.py --config configs/corner.yaml \
+#         --task corner --force
+#
+# That touches only the three corner buckets; the enhancement ones are generated
+# from their own config and are left alone.
+#
+# The first epoch's printed samples/s is the real number. Read it before
+# committing to a full run rather than trusting the estimate above.
+
+_base_: base.yaml
+
+task: corner
+
+data:
+  canvas: [1152, 1536]
+
+train:
+  # 20 x 150 x 16 = 48 000 photos. Corner localisation is a far smaller job than
+  # restoration — eight numbers against three quarters of a million pixels — so
+  # it needs fewer samples, which is fortunate, because each one costs more.
+  epochs: 20
+  iters_per_epoch: 150
+  batch_size: 16
+
+log:
+  # Steer on the metric the brief compares the two approaches with, not on the
+  # loss: the two detectors are trained against different losses (coordinates and
+  # heatmaps) whose values are not comparable, and the localisation error is.
+  keep_best_on: val_corner_err
+  best_mode: min

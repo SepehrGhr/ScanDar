@@ -132,31 +132,18 @@ degradation:
   noise_sigma: [0.004, 0.03]
   jpeg_quality: [30, 80]
 
-# --- the model ------------------------------------------------------------
-# Shape only; which model is a per-experiment choice. The first version of every
-# model in this project carries no dropout and no weight decay, because the brief
-# requires it and because the regularisation study later depends on dropout being
-# the only thing that changed.
-model:
-  name: docunet
-  base: 32                  # encoder widths 32/64/128/256, 512 at the bottleneck
-  depth: 4
-  norm: batch
-  dropout: 0.0
-  residual_output: false    # predict the correction instead of the image
-  skips: true               # false only to demonstrate what skip connections do
-
-# --- the loss -------------------------------------------------------------
-# MSE alone is minimised by the conditional mean, which is a blur, and blur is
-# exactly what makes text unreadable. L1 commits to an answer, MS-SSIM scores
-# structure at several scales, and the Sobel term puts the penalty on the stroke
-# edges where legibility lives (brief §3.2). Every ablation is these four numbers.
-loss:
-  l1: 1.0
-  mse: 0.0
-  msssim: 0.5
-  ssim: 0.0
-  sobel: 0.25
+# --- the model and the loss -----------------------------------------------
+# Deliberately *not* here. This file holds what the whole project shares — the
+# data, the generator, the schedule — and the two tasks share none of their
+# architecture: an image-to-image U-Net and a corner detector have no settings in
+# common, and a `model:` block inherited from here would hand one of them the
+# other's keys. So `enhance.yaml`, `corner_reg.yaml` and `corner_heat.yaml` each
+# carry their own, and the ablations inherit from whichever of those they vary.
+#
+# What *is* shared is a rule: the first version of every model in this project
+# carries no dropout and no weight decay, because the brief requires it (§3.1,
+# §5) and because the regularisation study later depends on dropout being the
+# only thing that changed.
 
 # --- training -------------------------------------------------------------
 train:

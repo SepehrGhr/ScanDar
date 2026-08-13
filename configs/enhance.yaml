@@ -20,6 +20,30 @@ run:
     Baseline U-Net with skip connections, direct sigmoid output,
     L1 + MS-SSIM + Sobel loss.
 
+# --- the model ------------------------------------------------------------
+# Shape only; the ablations beside this file change one line of it each. No
+# dropout and no weight decay in this first version, per the brief.
+model:
+  name: docunet
+  base: 32                  # encoder widths 32/64/128/256, 512 at the bottleneck
+  depth: 4
+  norm: batch
+  dropout: 0.0
+  residual_output: false    # predict the correction instead of the image
+  skips: true               # false only to demonstrate what skip connections do
+
+# --- the loss -------------------------------------------------------------
+# MSE alone is minimised by the conditional mean, which is a blur, and blur is
+# exactly what makes text unreadable. L1 commits to an answer, MS-SSIM scores
+# structure at several scales, and the Sobel term puts the penalty on the stroke
+# edges where legibility lives (brief §3.2). Every ablation is these four numbers.
+loss:
+  l1: 1.0
+  mse: 0.0
+  msssim: 0.5
+  ssim: 0.0
+  sobel: 0.25
+
 log:
   # Steer on PSNR rather than on the loss. The loss is a weighted blend chosen by
   # this project; PSNR is the metric the report is judged on and is comparable

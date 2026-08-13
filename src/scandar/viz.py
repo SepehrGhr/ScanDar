@@ -80,9 +80,12 @@ def training_curves(run_dir: Path | str, out_path: Path | str | None = None, bas
     capacity or by the data; a validation curve that turns back up while the
     training curve keeps falling is overfitting.
 
-    The right panel carries the metric the run was actually steered on, and the
-    do-nothing baseline as a horizontal line — because a PSNR curve without the
-    line the model has to clear does not say whether the model is any good.
+    The right panel carries the metric the run was actually steered on — PSNR for
+    a restoration, corner localisation error for a detector — and the do-nothing
+    baseline as a horizontal line, because a curve without the line the model has
+    to clear does not say whether the model is any good. ``baseline_psnr`` is
+    named for the restoration case it was written for; it is really "the line
+    this run has to clear", whichever metric the right panel ends up showing.
     """
     import matplotlib.pyplot as plt
 
@@ -101,16 +104,24 @@ def training_curves(run_dir: Path | str, out_path: Path | str | None = None, bas
     left.set_yscale("log")
     left.legend()
 
-    if any("val_psnr" in r for r in rows):
-        right.plot(epochs, [r["val_psnr"] for r in rows], color=COLORS["accent"],
-                   label="validation PSNR")
+    # Whichever headline metric this run recorded. The two tasks are steered on
+    # different numbers, and one of them gets better by going down.
+    for key, unit, label, baseline_label in (
+        ("val_psnr", "PSNR (dB)", "validation PSNR", "degraded input ({:.2f} dB)"),
+        ("val_corner_err", "corner error (px)", "validation corner error",
+         "classical detector ({:.2f} px)"),
+    ):
+        if not any(key in r for r in rows):
+            continue
+        right.plot(epochs, [r[key] for r in rows], color=COLORS["accent"], label=label)
         if baseline_psnr is not None:
             right.axhline(baseline_psnr, color=COLORS["baseline"], linestyle="--", linewidth=1.2,
-                          label=f"degraded input ({baseline_psnr:.2f} dB)")
+                          label=baseline_label.format(baseline_psnr))
         right.set_xlabel("epoch")
-        right.set_ylabel("PSNR (dB)")
-        right.set_title("validation PSNR")
+        right.set_ylabel(unit)
+        right.set_title(label)
         right.legend()
+        break
 
     out_path = Path(out_path) if out_path else run_dir / "training_curves.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)

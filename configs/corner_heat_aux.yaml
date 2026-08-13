@@ -1,0 +1,34 @@
+# Heatmap ablation: optimise the coordinate, not just the map  (brief §5)
+#
+# The heatmap detector is trained on maps but *read* through a soft-argmax, so
+# what it optimises and what it is scored on are not the same quantity. A map can
+# improve its MSE by tidying up the background — thousands of cells — while the
+# peak, the only part the coordinate depends on, sits slightly off. This run adds
+# an L1 on the soft-argmax of the predicted maps, which puts a gradient directly
+# on the number that gets reported.
+#
+# **The weights are the whole experiment, and they are not obvious.** The two
+# terms live on different scales: heatmap MSE against a 99.6%-empty target starts
+# around 1e-3, while a coordinate L1 starts around 1e-1. At equal weight the
+# coordinate term would drown the map term by two orders of magnitude and the run
+# would effectively become a slow, badly parameterised version of approach A.
+# 0.01 puts them in the same neighbourhood. The training log prints both terms
+# unweighted every epoch, so one epoch is enough to see whether the ratio is
+# right — and it is the first thing to adjust if this run underperforms the plain
+# heatmap baseline.
+
+_base_: corner_heat.yaml
+
+run:
+  name: corner_heat_aux
+
+loss:
+  name: corner
+  heatmap: 1.0
+  coord_l1: 0.01
+
+  # The extraction the gradient flows back through. "normalised" treats the map
+  # as a density and is exact on the targets it was drawn from; a window is
+  # deliberately *not* used here, because during training the gradient should
+  # reach the whole map rather than only the neighbourhood of the current peak.
+  soft_argmax_mode: normalised

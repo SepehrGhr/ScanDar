@@ -1,0 +1,38 @@
+# Corner detection, approach A: direct coordinate regression  (brief §5)
+#
+# A convolutional encoder flattened into fully connected layers that emit the
+# eight numbers of the four corners, trained with an L1 loss on the normalised
+# coordinates. The simple formulation — "but is it easy to train well?", as the
+# brief puts it.
+#
+#   python train.py --config configs/corner_reg.yaml
+#   python evaluate.py --config configs/corner_reg.yaml
+#
+# The prediction about how this fares against the heatmap formulation is written
+# down in reports/PREDICTIONS.md, and was committed before either had trained.
+
+_base_: corner.yaml
+
+run:
+  name: corner_reg
+  notes: >
+    Five stride-2 conv stages flattened into FC 512 -> 8, sigmoid output,
+    L1 on normalised coordinates. No dropout, no weight decay.
+
+model:
+  name: cornerregnet
+  base: 32                  # 32, 64, 128, 256, 256 over five halvings: 256 -> 8
+  stages: 5
+  grid: 8                   # the spatial grid the flatten reads, 8x8x256 = 16384
+  hidden: 512
+  norm: batch
+  dropout: 0.0              # conv-side; the first version carries none
+  fc_dropout: 0.0           # the classic place for it (brief §6), and still zero
+  output_activation: sigmoid
+
+loss:
+  name: corner
+  coord_l1: 1.0
+  coord_l2: 0.0
+  coord_wing: 0.0           # corner_reg_wing.yaml is this line and its opposite
+  heatmap: 0.0
