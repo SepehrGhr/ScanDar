@@ -50,6 +50,8 @@ Both are no-ops when the sets are already present and match.
 1. **Push first.** The notebook clones from GitHub and runs `git pull --ff-only`; a config that only
    exists on the laptop is a config Colab cannot run.
 2. Run cells 1–3: GPU check, mount Drive, clone and `pip install -e .`.
+   Then cell 3b, which **pins OpenCV to the version the data was generated with** and restarts the
+   runtime. See the pitfall below — this one is not optional.
 3. Run cell 4. It unpacks `data.zip` from Drive to `/content/data` and points `SCANDAR_DATA` there,
    while `SCANDAR_OUT` stays on Drive. **This split is deliberate**: the generator opens scans and
    background photos inside every `__getitem__` across several worker processes, and Drive is a
@@ -114,10 +116,37 @@ A bigger batch does not help — it is the same CPU work per sample either way. 
 `grad_accum` are separate keys so the *effective* batch can be held constant on a machine where the
 real one does not fit; at 256² patches the default of 16 peaks around 3 GB and fits everywhere.
 
-Two other things not worth trying: `persistent_workers` is off deliberately (the dataset's per-epoch
-state is a parent-side mutation that never reaches an already-forked worker, so persistent workers
-would replay one epoch's samples for the whole run), and Colab's OpenCV is 4.x while the laptop's is
-5.0 — the code sticks to the 4.x API surface for that reason.
+## The OpenCV version is part of the dataset
+
+Colab ships OpenCV 4.x. Everything on disk here — the frozen buckets, and every trained baseline —
+came from **5.0.0.93**, and the whole dataset *is* OpenCV output: the warps, the blurs, the noise,
+the JPEG encoding. Run the sanity checks on a 4.x runtime and the frozen sets fail like this:
+
+```
+✗ frozen enhance/test   test_0100, test_0199 no longer regenerate byte-identically
+```
+
+with a minority of samples failing per bucket and the rest passing — the signature of a library
+difference, not of a changed generator.
+
+**Do not re-freeze.** `--force` would overwrite the correct buckets with 4.x-encoded ones and every
+number this project has already measured would stop being comparable with every number it measures
+next. The buckets that came off Drive are the right ones; the runtime is what is wrong.
+
+The fix is cell 3b: uninstall Colab's cv2 packages, install `opencv-python-headless==5.0.0.93`,
+restart the runtime, re-run the checks. They go green, and — the reason this matters beyond a tidy
+report — training then generates the same samples the baselines were trained on, so an arm trained
+here and a baseline trained on the laptop still differ by dropout and nothing else.
+
+The code itself sticks to the OpenCV 4.x API surface, so it *runs* fine on 4.x. Reproducing bytes is
+a stricter requirement than running, and it is the one this project depends on.
+
+## Other things not worth trying
+
+A bigger `num_workers` than `auto` picks: there are only about two cores to share.
+`persistent_workers`: off deliberately, because the dataset's per-epoch state is a parent-side
+mutation that never reaches an already-forked worker, so persistent workers would replay one epoch's
+samples for the whole run. And two runs at once in one runtime: same wall clock, worse failure modes.
 
 ## Bringing the results home
 
