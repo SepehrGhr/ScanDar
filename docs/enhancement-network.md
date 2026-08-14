@@ -312,11 +312,17 @@ affordable; here they are close to free, which changes which experiments are wor
 
 ## Not built yet
 
-The OCR comparison against the commercial scanning app, and the end-to-end scanner that chains this
-network to the [corner detector](corner-detection.md). The real-photo half of the evaluation also
+The OCR comparison against the commercial scanning app. The real-photo half of the evaluation also
 waits on the reference scans and the corner annotations, neither of which has been captured yet.
 
-The [dropout study](dropout-study.md) *(brief §6)* is set up and not yet run: `enhance_dropout`
-inherits `enhance_realistic` and adds `bottleneck_dropout: 0.2`, `enhance_dropout_wide` puts a
-smaller rate in every block instead, and both pin the 20-epoch schedule the baseline actually ran so
-the comparison cannot turn into a comparison of schedules.
+This network is now also the second half of the [end-to-end scanner](end-to-end-scanner.md)
+*(brief §7)*, which chains it to the [corner detector](corner-detection.md). It is **frozen** there:
+under a joint loss it would otherwise learn to absorb the detector's misalignment by blurring, and
+the detector — the half being fine-tuned — would receive no signal at all.
+
+The [dropout study](dropout-study.md) *(brief §6)* has run for this network, and **it found nothing**:
+`enhance_dropout` — the baseline plus `Dropout2d(0.2)` at the bottleneck, everything else identical —
+scores 25.42 dB against the baseline's 25.35 dB at the same epoch of the same schedule, a difference
+inside this setup's run-to-run noise. The validation-minus-training loss went from 0.0036 to 0.0022,
+both of which describe a model that is not overfitting in the first place. Which is what the 0.14 dB
+train-to-test gap above predicted, and why that prediction was written down before the arm ran.

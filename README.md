@@ -34,8 +34,8 @@ Built incrementally; this table is kept honest.
 | Loss and architecture ablations | configs written, runs pending |
 | Corner detection: both networks, losses, metrics and the §5.1 inference pipeline | **done — heatmap detector trained, 1.06 px on test** |
 | Real-photo study: OCR readability against a commercial scanning app | not started |
-| Dropout study: does it close the synthetic-to-real gap? | configs written, runs pending — [how it is set up](docs/dropout-study.md) |
-| The end-to-end scanner | not started |
+| Dropout study: does it close the synthetic-to-real gap? | **done on the synthetic half — a null result, written up** — [the study](docs/dropout-study.md); the real-photo half waits on the reference scans |
+| The end-to-end scanner *(bonus)* | **done — chained, differentiable, fine-tuned and scored** — [how it works](docs/end-to-end-scanner.md) |
 | Demo app, figures, written report | not started |
 
 ### Enhancement network — results
@@ -90,6 +90,53 @@ On the 19 real phone photos, **17 came straight from the network** — carpet, m
 table, hard shadows and steep angles. The other two went to the classical guardrail, which is what it
 is there for.
 
+### Dropout — a null result, and one surprise
+
+Every model retrained with dropout as its only change *(brief §6)*, compared at the same epoch of the
+same schedule so the comparison is controlled rather than merely available:
+
+| Model | metric | baseline | with dropout | change |
+| :--- | :--- | ---: | ---: | ---: |
+| enhancement network | validation PSNR | 25.35 dB | 25.42 dB | +0.07 |
+| coordinate regressor | validation corner error | 4.56 px | 5.66 px | **−1.11** |
+
+**Dropout buys nothing here, and that is the correct answer rather than a disappointing one.** The
+train-to-test gaps before any dropout were 0.14 dB, 0.27 px and −0.06 px — there was no overfitting
+for a regulariser to remove, because a generator that never repeats a sample gives a model nothing to
+memorise. This was predicted, in writing, before the arms ran.
+
+The surprise is *which* model lost. The prediction named the coordinate regressor as most likely to
+benefit — its fully connected head is 8.4 M weights, four fifths of the model, the one genuinely
+over-parameterised map in the project — and it is the arm that clearly degraded. Over-parameterised
+turned out not to mean over-fitting: dropout there injects noise straight into a low-dimensional
+continuous estimate with no redundancy to absorb it, while the same rate at a U-Net bottleneck is
+shrugged off. The full scoring is in [the study](docs/dropout-study.md).
+
+### The end-to-end scanner — the bonus, and what it bought
+
+A phone photo in, a clean scan out, with nobody clicking anything *(brief §7)*. The chain is built
+twice: once on OpenCV for inference, and once in torch — homography solved with `torch.linalg.solve`,
+page sampled with `grid_sample` — so the **enhancement loss can be backpropagated all the way to the
+predicted corners**. Both are runnable, and they agree to 0.001 of a grey level.
+
+All 200 synthetic test photos, the same chain before and after fine-tuning the detector through that
+differentiable warp:
+
+| | assembled | fine-tuned end to end |
+|---|---:|---:|
+| corner error (px @256) | 0.68 ± 0.54 | **0.66 ± 0.56** |
+| scan PSNR, detected corners | 18.97 dB | **19.01 dB** |
+| scan PSNR, true corners | 26.70 dB | 26.70 dB |
+| degraded input | 15.30 dB | 15.30 dB |
+
+**The fine-tune works and buys nothing, which was the prediction.** Corner error improves on 130 of
+200 photos — real by a sign test, p ≈ 10⁻⁵ — and amounts to 2.4% of an error already smaller than a
+pixel. On the *harder* corner bucket the fine-tuned detector is a hair worse (1.10 px against 1.06),
+so `corner_heat` stays the shipped model and the fine-tune stands as the demonstration it was built to
+be. The 7.7 dB between the two right-hand columns is what the detection step costs — and it is a
+floor rather than a slope, because PSNR against text punishes sub-pixel misregistration immediately
+and then stops caring how large it is.
+
 ## Quickstart
 
 ```bash
@@ -113,9 +160,13 @@ flattens the page before restoring it:
 python scripts/enhance_photo.py --input my_photo.jpg
 ```
 
-Or let the corner detector do it, over a whole folder, with no window and no clicking:
+Or let the corner detector do it, with no window and no clicking — one photo, or a whole folder:
 
 ```bash
+scandar scan --input my_photo.jpg --output scan.png \
+    --detector outputs/runs/corner_heat/best.pt \
+    --enhancer outputs/runs/enhance_realistic/best.pt
+
 python scripts/detect_batch.py  --input my_photos/            # corners, overlays, flattened pages
 python scripts/enhance_batch.py --input my_photos/ --detect   # photo in, clean scan out
 ```

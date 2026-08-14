@@ -62,9 +62,32 @@ a soft-argmax read back off the target reproduces the label instead of a quantis
 The original size travels with every sample because predictions have to be mapped back to the photo
 they came from, and reconstructing that afterwards is how corners end up scaled by the wrong factor.
 
+### `SyntheticScanDataset`
+
+```python
+{"image":   float32 (3, 256, 256) in [0, 1],   # what the detector reads
+ "source":  uint8   (3, 2560, 1920),           # what the differentiable warp resamples
+ "corners": float32 (4, 2) in [0, 1],
+ "target":  float32 (3, 256, 256) in [0, 1],   # the clean scan, one window of the flat page
+ "box":     int32 (3,)}                        # where that window sits, (x, y, size)
+```
+
+For the [end-to-end scanner](end-to-end-scanner.md) *(brief §7)*, which needs a sample carrying both
+tasks' labels at once — neither of the two above does. It is a third view of the same `Sample`, so it
+needed no generator work.
+
+Two things are unusual here and both are deliberate. The large photo travels in **8 bits**, because a
+float copy of a 1920×2560 canvas is 59 MB per sample through the loader and it is converted on the
+GPU instead; and it is **not shrunk**, because the page would then be upsampled into the target,
+which is the pathology `enhance_realistic` exists to avoid. There is no degraded input in the sample:
+the model warps its own, out of the photo, through the corners the detector predicted.
+
 ### `FrozenSyntheticDataset`
 
-Reads the validation and test samples generated once and written to disk. Serves either task.
+Reads the validation and test samples generated once and written to disk. Serves either task — and
+the scanner, which has no bucket of its own and borrows the enhancement one, because those photos are
+the only ones whose restoration target is achievable. They carry no distractor sheet, so a detector
+scores better there than on its own bucket; that caveat has to travel with the numbers.
 
 ## Preprocessing choices
 

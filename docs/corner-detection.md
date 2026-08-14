@@ -480,7 +480,16 @@ page, and those want opposite fixes.
 **The real-photo half of the comparison**, which is the half the brief cares most about. It needs the
 Roboflow COCO-keypoints export, which has not landed; `scripts/parse_roboflow.py` and the real-photo
 dataset are deliberately unwritten rather than written blind against an export whose shape is unknown.
-Also the failure-case galleries and PCK curve figures, and the end-to-end scanner that chains this
-detector to the enhancement network *(brief §7, the bonus)*. The [dropout study](dropout-study.md)
-*(brief §6)* is set up — `corner_reg_dropout` and `corner_heat_dropout` inherit these two configs and
-change one line each — and neither arm has been trained.
+Also the failure-case galleries and PCK curve figures. The
+[end-to-end scanner](end-to-end-scanner.md) *(brief §7, the bonus)* that chains this detector to the
+enhancement network **is built and has been fine-tuned**, under its own name (`corner_heat_e2e`) so
+that the matched pair above stays the controlled experiment it is. The fine-tune moved this detector
+by −0.02 px on the chain's own bucket and **+0.04 px on the harder bucket scored above** (1.10 against
+1.06), which is why `corner_heat` is still the model every script defaults to.
+The [dropout study](dropout-study.md) *(brief §6)* has run on both detectors, at reduced length, and
+the interesting half of its result is here: **`fc_dropout: 0.3` in the regressor's head makes it
+worse** — 5.66 px against 4.56 px at the same epoch of the same schedule — which is the opposite of
+what was predicted for the one model in this project whose head is genuinely over-parameterised. The
+heatmap detector's arm could not be compared on its per-epoch curve at all, because this baseline
+predates the extraction fix and its log records 6.26 px where the same checkpoint re-evaluates to
+0.70; the comparison tool detects that disagreement and refuses rather than printing it.
