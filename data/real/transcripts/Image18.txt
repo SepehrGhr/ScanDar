@@ -1,0 +1,28 @@
+Linear Algebra for Computer Science
+Fall 1403 (2024)
+Instructor: Behrooz Nasihatkon
+Midterm Exam
+Azar 1404 (Dec. 2025)
+
+Note: You may use all results proved in class, but not the solutions to the homework
+assignments.
+
+1. (35 points) Let A and B be two matrices of compatible sizes. We aim to show that
+rank(AB) = rank(B) if N(A) ∩ C(B) = {0}, where N(A) denotes the null space of A and
+C(B) denotes the column space of B.
+(a) (5 points) Show that N(B) ⊆ N(AB).
+(b) (22 points) Show that if N(A) ∩ C(B) = {0}, then N(AB) ⊆ N(B).
+(c) (8 points) Conclude that if N(A) ∩ C(B) = {0}, then rank(AB) = rank(B).
+
+2. (30 points) Let A ∈ R^(n×n) be an invertible matrix and let u, v ∈ R^n satisfy
+v^T A^-1 u ≠ -1. Show that the inverse of the matrix A + uv^T can be written in the form
+(A + uv^T)^-1 = A^-1 - α A^-1 uv^T A^-1,
+for some scalar α ∈ R. Also determine the value of α. (Hint: Note that v^T A^-1 u is a
+scalar.)
+
+3. (35 points) Consider the least-squares problem Ax = b, where
+A = [Q; D] ∈ R^(2n×n),
+Q ∈ R^(n×n) is an orthogonal matrix (Q^-1 = Q^T), and D ∈ R^(n×n) is a diagonal matrix.
+Also,
+b = (Qy; (D^-1 + 2D)y) ∈ R^(2n),
+where y ∈ R^n. Obtain the least-squares solution of Ax = b in terms of y.
