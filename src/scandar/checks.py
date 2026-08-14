@@ -958,6 +958,11 @@ CLASSICAL_MIN_HIT_RATE = 0.5
 
 PIPELINE_SAMPLES = 6
 
+#: How many of the real photographs the end-to-end chain is smoke-tested on. All
+#: nineteen would be better and costs a minute; these checks are meant to be run
+#: before every commit, so it is a handful.
+REAL_SCAN_SAMPLES = 6
+
 
 def check_corner_pipeline() -> list[Result]:
     """The §5.1 pipeline, end to end, on real frozen photos.
@@ -1058,6 +1063,228 @@ def check_corner_pipeline() -> list[Result]:
     return results
 
 
+#: How much of the enhancement loss's gradient has to survive the trip back to
+#: the corners for the chain to count as differentiable. Deliberately a floor
+#: rather than a range: the number itself means nothing — it scales with the
+#: patch, the loss weights and the image's own contrast — while zero, or a NaN,
+#: means the graph is cut and the bonus is not implemented.
+MIN_CORNER_GRADIENT = 1e-12
+
+#: How far the OpenCV warp and its differentiable twin may drift apart, in grey
+#: levels averaged over a rectified page. They are the same maths sampled by two
+#: libraries, so the only honest disagreement is in how each rounds its
+#: interpolation weights — a fraction of a level. Anything larger means one of
+#: them has moved, and the fine-tuning would then be training through an
+#: operation the shipped pipeline does not perform.
+MAX_WARP_GAP = 1.0
+
+
+def check_end_to_end() -> list[Result]:
+    """The bonus, on both counts *(brief §7)*.
+
+    **Does the loss reach the corners?** Push the enhancement loss back through
+    the enhancement network, through the warp and through the homography solve,
+    and look at the gradient sitting on the predicted corners. Finite and
+    non-zero is the whole claim of "end-to-end learning is implemented", and it
+    fails the instant somebody puts a numpy call in the chain — an
+    ``order_corners``, a ``.numpy()``, a detach for convenience — which is a very
+    easy thing to do while making the pipeline tidier.
+
+    **Does the chain hold together on a real photograph?** Photo in, flat page
+    out, no human input, on a handful of the frozen enhancement samples, with a
+    count of which path found the corners. Run with untrained models on purpose:
+    whether a trained chain is *accurate* is `evaluate.py`'s question, and the
+    plumbing should be answerable before any model exists.
+    """
+    import numpy as np
+    import torch
+
+    from .config import load_config
+    from .datasets import scan_item
+    from .geometry import order_corners
+    from .io import read_json
+    from .losses import ScanLoss
+    from .model import build_model
+    from .pipelines import scan_document
+    from .prepare import ScanBank
+    from .seed import rng_for
+    from .synth import Sample
+
+    results: list[Result] = []
+    scanner = build_model(
+        {
+            "model": {
+                "name": "scanner",
+                "detector": {"name": "cornerheatnet", "base": 8, "depth": 3, "out_stride": 2},
+                "enhancer": {"name": "docunet", "base": 8, "depth": 2},
+                "rect_size": [256, 362],
+                "patch_size": 64,
+            }
+        }
+    )
+
+    directory = paths.frozen_set("enhance", "val")
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.exists():
+        return [Result("end to end", WARN, "no frozen enhancement samples to run it on")]
+
+    entries = read_json(manifest_path)["samples"]
+    indices = _spread(len(entries), PIPELINE_SAMPLES)
+    scans = ScanBank()
+    config = load_config(paths.repo / "configs" / "enhance.yaml")
+    input_size = int(config.data.get("corner_input", 256))
+
+    # --- the gradient ------------------------------------------------------
+    from .geometry import homography, rect_corners
+
+    entry = entries[indices[0]]
+    photo = imread_rgb(directory / entry["photo"])
+    scan = scans.load(entry["scan"])
+    corners = np.asarray(entry["corners"], dtype=np.float32)
+    scan_height, scan_width = scan.shape[:2]
+    sample = Sample(
+        photo=photo,
+        corners=corners,
+        scan=scan,
+        H=homography(rect_corners(scan_width, scan_height), corners),
+        params={"scan": entry["scan"], "id": entry["id"]},
+    )
+    item = scan_item(
+        sample,
+        rng_for("check-scan", entry["id"]),
+        input_size=input_size,
+        heatmap_size=input_size // 2,
+        heatmap_sigma=3.0,
+        source_side=1024,
+        rect_size=(256, 362),
+        patch_size=64,
+    )
+    batch = {key: item[key][None] for key in ("image", "source", "box", "corners", "target")}
+    output = scanner(batch)
+    predicted = output["corners"]
+    predicted.retain_grad()
+    loss, _ = ScanLoss()(output, {"target": batch["target"], "corners": batch["corners"]})
+    loss.backward()
+
+    gradient = predicted.grad
+    detector_gradient = sum(
+        float(p.grad.abs().sum())
+        for p in scanner.detector.parameters()
+        if p.grad is not None
+    )
+    reaches = (
+        gradient is not None
+        and bool(torch.isfinite(gradient).all())
+        and float(gradient.abs().sum()) > MIN_CORNER_GRADIENT
+        and detector_gradient > MIN_CORNER_GRADIENT
+    )
+    results.append(
+        Result(
+            "gradient reaches the corners",
+            PASS if reaches else FAIL,
+            f"|dL/dcorners| {float(gradient.abs().sum()):.3e}, "
+            f"detector weights {detector_gradient:.3e}"
+            if gradient is not None
+            else "no gradient arrived — the chain is cut somewhere",
+        )
+    )
+
+    # --- the chain ---------------------------------------------------------
+    sources: dict[str, int] = {}
+    problems: list[str] = []
+    for index in indices:
+        entry = entries[index]
+        photo = imread_rgb(directory / entry["photo"])
+        with torch.no_grad():
+            result = scan_document(
+                photo,
+                scanner.detector,
+                scanner.enhancer,
+                input_size=input_size,
+                out_width=192,
+                tile=192,
+            )
+        sources[result["source"]] = sources.get(result["source"], 0) + 1
+
+        quad = result["corners"]
+        expected = (int(round(192 * 1.4142)), 192, 3)
+        if result["scan"].shape != expected:
+            problems.append(f"{entry['id']} produced {result['scan'].shape}, wanted {expected}")
+        elif result["scan"].dtype != np.uint8:
+            problems.append(f"{entry['id']} produced {result['scan'].dtype}, not 8-bit")
+        elif not np.allclose(quad, order_corners(quad), atol=1e-3):
+            problems.append(f"{entry['id']} used corners that are out of canonical order")
+
+    results.append(
+        Result(
+            "scan_document",
+            FAIL if problems else PASS,
+            "; ".join(problems)
+            if problems
+            else f"{len(indices)} photos to clean pages, corners from: "
+            + ", ".join(f"{name} x{count}" for name, count in sorted(sources.items())),
+        )
+    )
+
+    # --- the two warps have to be the same operation ------------------------
+    # The bonus rests on this: what the fine-tuning pushes a gradient through is
+    # only meaningful if it is the same flattening the shipped pipeline performs.
+    # Measured on a real frozen photo rather than on a synthetic pattern, because
+    # the interpolation weights are where the two could differ.
+    from .pipelines import rectify_document
+
+    photo = imread_rgb(directory / entries[indices[0]]["photo"])
+    corners = np.asarray(entries[indices[0]]["corners"], dtype=np.float32)
+    with_cv2 = rectify_document(photo, corners, out_width=256, aspect="a4", backend="cv2")
+    with_torch = rectify_document(photo, corners, out_width=256, aspect="a4", backend="torch")
+    gap = float(np.abs(with_cv2.astype(np.float32) - with_torch.astype(np.float32)).mean())
+    results.append(
+        Result(
+            "both warps agree",
+            PASS if gap <= MAX_WARP_GAP else FAIL,
+            f"cv2 against the differentiable path: {gap:.3f} grey levels mean "
+            f"(tolerance {MAX_WARP_GAP:g})",
+        )
+    )
+
+    # --- and on the real photographs, which is what the day is about --------
+    real = list_images(paths.real_photos)[:REAL_SCAN_SAMPLES]
+    if not real:
+        results.append(Result("scan_document: real photos", WARN, "no real photos to run it on"))
+        return results
+
+    real_sources: dict[str, int] = {}
+    failures = []
+    for path in real:
+        try:
+            with torch.no_grad():
+                result = scan_document(
+                    photo=imread_rgb(path),
+                    detector=scanner.detector,
+                    enhancer=scanner.enhancer,
+                    input_size=input_size,
+                    out_width=192,
+                    tile=192,
+                )
+        except Exception as exc:  # noqa: BLE001 - a crash here is the finding
+            failures.append(f"{path.name}: {type(exc).__name__}: {exc}")
+            continue
+        real_sources[result["source"]] = real_sources.get(result["source"], 0) + 1
+
+    results.append(
+        Result(
+            "scan_document: real photos",
+            FAIL if failures else PASS,
+            "; ".join(failures)
+            if failures
+            else f"{len(real)} unseen photographs, no crashes, corners from: "
+            + ", ".join(f"{name} x{count}" for name, count in sorted(real_sources.items()))
+            + " (untrained models — the paths taken say nothing about accuracy)",
+        )
+    )
+    return results
+
+
 def _decoded_gap(stored_path, sample, entry) -> dict | None:
     """How far a regenerated sample is from the stored one, past the encoding.
 
@@ -1154,6 +1381,7 @@ CHECKS = (
     ("training loop", check_training_step),
     ("training loop: corner detectors", check_corner_training),
     ("inference: corner pipeline", check_corner_pipeline),
+    ("inference: end-to-end scanner", check_end_to_end),
 )
 
 _SYMBOL = {PASS: "✓", WARN: "!", FAIL: "✗"}
