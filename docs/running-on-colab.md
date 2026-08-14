@@ -7,14 +7,31 @@ every path the project uses, and `train.device` / `train.num_workers` default to
 
 ## The one-time setup
 
-Copy `data/` to `MyDrive/scandar/data`. Everything except `data/frozen/` is small (~75 MB); the six
-frozen evaluation buckets are ~400 MB on top.
+`data/` is gitignored, so the clone arrives without it and nothing runs until it is on Drive. It is
+473 MB in 1360 files — 400 MB of that is the six frozen evaluation buckets — and Drive's upload
+charges per file, so **upload one archive rather than the tree**:
+
+```bash
+cd ~/ScanDar && zip -rq ~/scandar-data.zip data     # ~473 MB, a few minutes
+```
+
+Put `scandar-data.zip` in `MyDrive/scandar/` **renamed to `data.zip`**; the notebook unpacks it onto
+the runtime's own disk. Uploading the folder itself also works and the notebook falls back to it, but
+it is far slower.
 
 ```
 MyDrive/scandar/
-├── data/        ← scans, cache, backgrounds, real, frozen, splits.json
+├── data.zip     ← the archive above (or an unpacked data/ folder)
 └── outputs/     ← created by the first run: runs/<name>/{config.yaml,last.pt,best.pt,metrics.csv}
 ```
+
+**Upload the frozen buckets rather than regenerating them on Colab.** They are deterministic and can
+be rebuilt bit-for-bit *on the same machine*, but Colab ships OpenCV 4.x against the laptop's 5.0 and
+the buckets are stored as JPEG — two libjpeg versions need not encode identical bytes. Rebuilding
+them there would mean the dropout arms were scored on subtly different images than the baselines they
+are compared against, which is the one thing this whole study cannot afford. The scan cache
+(`data/cache/`) is the exception: it is PNG, lossless, and `prepare_data.py` regenerates it from
+`data/scans/` if it is missing.
 
 **Copy the frozen buckets; do not regenerate them casually.** They can be regenerated bit-for-bit,
 but the enhancement buckets and the corner buckets were frozen from *different* configs, so the
@@ -33,7 +50,7 @@ Both are no-ops when the sets are already present and match.
 1. **Push first.** The notebook clones from GitHub and runs `git pull --ff-only`; a config that only
    exists on the laptop is a config Colab cannot run.
 2. Run cells 1–3: GPU check, mount Drive, clone and `pip install -e .`.
-3. Run cell 4. It copies the data from Drive to `/content/data` and points `SCANDAR_DATA` there,
+3. Run cell 4. It unpacks `data.zip` from Drive to `/content/data` and points `SCANDAR_DATA` there,
    while `SCANDAR_OUT` stays on Drive. **This split is deliberate**: the generator opens scans and
    background photos inside every `__getitem__` across several worker processes, and Drive is a
    network filesystem, so reading training data through it is slow in exactly the place this project
