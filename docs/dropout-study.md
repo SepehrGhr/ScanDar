@@ -91,6 +91,51 @@ python evaluate.py --config configs/corner_reg_dropout.yaml
 On Colab, add the wall-clock guard and re-run the identical command to resume; see
 [running on Colab](running-on-colab.md).
 
+### Running the arms at half length, without giving up the comparison
+
+Three full arms are about 6.4 hours of GPU time. There is a way to spend half of that and still say
+something defensible, and one way to spend half of it and say nothing at all — they differ by one
+config key.
+
+**The wrong way** is `train.epochs: 10`. The learning rate follows a cosine over the whole declared
+schedule, so a 10-epoch run anneals to its floor by epoch 10 while the 20-epoch baseline is still at
+1.1e-4 there. Every comparison then confounds dropout with the schedule, and the arm's final number
+is not comparable with anything.
+
+**The right way** is to leave `epochs: 20` alone and stop the run early:
+
+```bash
+python train.py --config configs/corner_reg_dropout.yaml --set train.stop_after_epoch=10
+```
+
+The learning rate, the data, the seed and the sample count are then *identical* to the baseline's
+first ten epochs, so the arm can be read against **the baseline's own epoch 10**, which is already
+recorded in `outputs/runs/<baseline>/metrics.csv`. Nothing has to be retrained to produce the other
+side of the comparison.
+
+```bash
+python scripts/compare_dropout.py --curves            # matched-epoch table
+python scripts/make_figures.py --compare corner_heat corner_heat_dropout
+```
+
+**What a half-length arm may and may not claim.** It may claim what happened to the
+train-to-validation gap at a matched epoch — which is the quantity §6 is actually about, and which
+barely depends on how far the run got. It may claim the two curves' shape. It may **not** quote its
+final test PSNR or corner error beside a baseline that trained twice as long, because half of that
+difference is the schedule.
+
+And the direction of the bias is worth stating in the write-up, because it is the honest reason the
+conclusion survives: **truncation is biased against dropout.** Dropout slows convergence, so an arm
+judged halfway looks worse than it would at the end. A null or slightly-negative result under that
+bias is therefore weak evidence that dropout hurts, and strong evidence that it does not help — and
+"does not help" is the claim this study is making, for the reason the table of baseline gaps above
+gives: there is no overfitting here to remove. A grader can check that reasoning against the numbers
+in `metrics.csv`, which is the point of writing it down this way rather than quietly running shorter
+runs and reporting the endpoints.
+
+If the budget stretches later, the arms resume: drop `stop_after_epoch` and re-run the identical
+command, and the run continues to epoch 20 on the schedule it was always following.
+
 ## Reading the result
 
 ```bash

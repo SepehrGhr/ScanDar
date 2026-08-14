@@ -450,3 +450,19 @@ def test_detect_corners_refuses_something_that_is_not_a_photo():
 
     with pytest.raises(ValueError, match="RGB HWC"):
         detect_corners(np.zeros((32, 32), dtype=np.uint8), None)
+
+
+def test_stopping_short_does_not_touch_the_learning_rate_schedule():
+    """`stop_after_epoch` cuts a run short for time; `epochs` declares a shorter
+    experiment. The difference is the whole point: only the first leaves the
+    schedule alone, so the truncated run's curve can still be read against a full
+    run's at the same epoch, which is how a shortened arm stays comparable."""
+    iters = 150
+    full = [lr_at(step, 20 * iters, 2 * iters, 2e-4, 1e-6) for step in range(10 * iters)]
+    short = [lr_at(step, 10 * iters, 2 * iters, 2e-4, 1e-6) for step in range(10 * iters)]
+
+    # Truncating leaves every step of the first half exactly where it was;
+    # re-declaring the run as ten epochs compresses the cosine into it.
+    assert full[:2 * iters] == short[:2 * iters]          # the warmup is the same
+    assert full[-1] > short[-1] * 10                       # the tails are not
+    assert short[-1] == pytest.approx(1e-6, abs=1e-7)      # short has fully annealed

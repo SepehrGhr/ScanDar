@@ -164,6 +164,14 @@ train:
   max_hours: null           # wall-clock guard so a Colab session stops cleanly
   resume: auto              # auto | none | <path to checkpoint>
 
+  # Stop after this many epochs *without* changing the schedule above. Lowering
+  # `epochs` declares a shorter experiment and compresses the cosine into it;
+  # this cuts a run short while the learning rate keeps following the schedule it
+  # was declared with, which is what lets a shortened run still be read against a
+  # full one at the same epoch. For a run that has to fit in an evening, not for
+  # an experiment that is meant to be short.
+  stop_after_epoch: null
+
 # --- logging --------------------------------------------------------------
 log:
   every_n_steps: 50

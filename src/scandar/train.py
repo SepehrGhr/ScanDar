@@ -411,6 +411,14 @@ def train(config: Config, resume: str | None = None) -> Path:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     epochs = int(train_cfg.epochs)
+    # Stop after this many epochs while keeping `epochs` — and therefore the
+    # learning-rate schedule — exactly as declared. Lowering `epochs` instead
+    # would compress the cosine into the shorter run, and the result could no
+    # longer be read against a longer run's curve at a matching epoch. This is
+    # for an arm that has to be cut short and still compared; it is not a way to
+    # declare a shorter experiment, which is what `epochs` is for.
+    stop_after = train_cfg.get("stop_after_epoch")
+    stop_after = int(stop_after) if stop_after else None
     iters_per_epoch = int(train_cfg.iters_per_epoch)
     grad_accum = max(1, int(train_cfg.get("grad_accum", 1)))
     grad_clip = float(train_cfg.get("grad_clip", 0.0) or 0.0)
@@ -477,6 +485,9 @@ def train(config: Config, resume: str | None = None) -> Path:
         print(f"resume    : {checkpoint_path.name} at epoch {start_epoch}, step {global_step}")
         if start_epoch >= epochs:
             print(f"\nnothing to do — the run already reached its {epochs} epochs")
+            return run_dir
+        if stop_after is not None and start_epoch >= stop_after:
+            print(f"\nnothing to do — the run already reached the epoch {stop_after} it stops at")
             return run_dir
 
     config.save(run_dir / "config.yaml")
@@ -606,6 +617,15 @@ def train(config: Config, resume: str | None = None) -> Path:
 
         if deadline is not None and time.time() > deadline:
             print(f"\nstopping at the {max_hours} hour guard — resume with the same command")
+            stopped_early = True
+            break
+
+        if stop_after is not None and epoch + 1 >= stop_after:
+            print(
+                f"\nstopping after epoch {stop_after} of the {epochs}-epoch schedule, as asked. "
+                "The learning rate followed the full schedule, so this run's curve reads against "
+                "a full one at the same epoch; its final numbers do not."
+            )
             stopped_early = True
             break
 

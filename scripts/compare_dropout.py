@@ -127,6 +127,121 @@ def compare(pairs, split: str = "Test", directory: Path | None = None) -> list[d
     return out
 
 
+# ---------------------------------------------------------------------------
+# the matched-epoch comparison, for an arm that was stopped short
+# ---------------------------------------------------------------------------
+#: What each task's per-epoch log is judged on, and which direction is better.
+CURVE_METRICS = {
+    "val_psnr": ("validation PSNR (dB)", "max", 2),
+    "val_corner_err": ("validation corner error (px @256)", "min", 2),
+}
+
+
+def read_curve(name: str) -> list[dict]:
+    """A run's per-epoch log, as written by the trainer."""
+    path = paths.run_dir(name) / "metrics.csv"
+    if not path.exists():
+        raise SystemExit(f"{path} not found — has {name} been trained?")
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def at_epoch(curve: list[dict], epoch: int) -> dict:
+    for row in curve:
+        if int(row["epoch"]) == epoch:
+            return row
+    raise SystemExit(f"no epoch {epoch} in the log — it reached epoch {curve[-1]['epoch']}")
+
+
+def compare_curves(pairs, epoch: int | None = None) -> list[dict]:
+    """Baseline against arm at the same epoch of the same schedule.
+
+    An arm stopped at epoch 10 of a 20-epoch schedule cannot have its final
+    numbers set beside a baseline that ran all 20 — half the difference would be
+    the schedule. It *can* be set beside the baseline's own epoch 10, because up
+    to that point the two runs are identical in every respect including the
+    learning rate, which is why the short arms keep `epochs: 20` and stop with
+    `train.stop_after_epoch` instead of declaring a shorter run.
+
+    Both curves are validation, measured on the frozen buckets on identical
+    patches, which is what makes them comparable at all.
+    """
+    out = []
+    for base_name, arm_name in pairs:
+        try:
+            base_curve, arm_curve = read_curve(base_name), read_curve(arm_name)
+        except SystemExit as exc:
+            print(f"skipped  : {exc}")
+            continue
+
+        key = next((k for k in CURVE_METRICS if k in arm_curve[0]), None)
+        if key is None:
+            raise SystemExit(f"{arm_name} logs neither of {sorted(CURVE_METRICS)}")
+        label, direction, digits = CURVE_METRICS[key]
+
+        # The last epoch the *arm* reached, which is the last one both ran.
+        matched = epoch or min(int(arm_curve[-1]["epoch"]), int(base_curve[-1]["epoch"]))
+        base_row, arm_row = at_epoch(base_curve, matched), at_epoch(arm_curve, matched)
+        base_value, arm_value = float(base_row[key]), float(arm_row[key])
+        improvement = arm_value - base_value if direction == "max" else base_value - arm_value
+
+        # The train-to-validation distance at that same epoch, from the losses,
+        # which every task logs. This is the quantity §6 is actually about, and
+        # unlike the metric it is barely sensitive to how far the run got.
+        base_gap = float(base_row["val_loss"]) - float(base_row["train_loss"])
+        arm_gap = float(arm_row["val_loss"]) - float(arm_row["train_loss"])
+
+        out.append(
+            {
+                "model": base_name,
+                "arm": arm_name,
+                "epoch": matched,
+                "metric": label,
+                "baseline": round(base_value, digits),
+                "dropout": round(arm_value, digits),
+                "change": round(improvement, digits),
+                "better": "dropout" if improvement > 0 else "baseline",
+                "baseline_val_minus_train_loss": round(base_gap, 5),
+                "dropout_val_minus_train_loss": round(arm_gap, 5),
+            }
+        )
+    return out
+
+
+def markdown_curve_table(rows) -> str:
+    lines = [
+        "### Dropout, at a matched epoch of an identical schedule",
+        "",
+        "| Model | arm | epoch | metric | baseline | with dropout | change | val−train loss "
+        "(baseline → dropout) |",
+        "| :--- | :--- | ---: | :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        sign = "+" if row["change"] > 0 else ""
+        lines.append(
+            f"| {row['model']} | {row['arm']} | {row['epoch']} | {row['metric']} "
+            f"| {row['baseline']} | {row['dropout']} | {sign}{row['change']} "
+            f"| {row['baseline_val_minus_train_loss']} → {row['dropout_val_minus_train_loss']} |"
+        )
+    lines += [
+        "",
+        "Both columns are validation on the frozen bucket, read off each run's own per-epoch log "
+        "at the **same epoch of the same schedule** — same learning rate, same number of samples "
+        "seen, same everything but dropout. An arm stopped early can be compared this way; its "
+        "final numbers cannot be compared with a baseline that ran to the end.",
+        "",
+        "The last column is validation loss minus training loss at that epoch — the overfitting "
+        "gap dropout exists to close. It is the honest headline for a shortened run, because "
+        "unlike the accuracy column it barely depends on how far the run got.",
+        "",
+        "**Truncation is biased against dropout on accuracy**: dropout slows convergence, so an "
+        "arm judged halfway through a schedule looks worse than it would at the end. That makes "
+        "a null result on the gap column the safe conclusion and a small accuracy loss the "
+        "unsafe one.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def markdown_table(rows, split: str) -> str:
     lines = [
         f"### Dropout, {split.lower()} split",
@@ -167,7 +282,34 @@ def main() -> int:
     parser.add_argument("--split", default="test", help="which frozen bucket to compare on")
     parser.add_argument("--tables", default=None, help="where evaluate.py wrote its tables")
     parser.add_argument("--out", default=None, help="where to write, default: reports/tables")
+    parser.add_argument(
+        "--curves", action="store_true",
+        help="compare the per-epoch logs at a matched epoch instead of the final tables — "
+             "the comparison to use when an arm was stopped short of its schedule",
+    )
+    parser.add_argument(
+        "--epoch", type=int, default=None,
+        help="with --curves: which epoch to compare at (default: the last one both reached)",
+    )
     args = parser.parse_args()
+
+    if args.curves:
+        pairs = [tuple(p) for p in args.pair] if args.pair else DEFAULT_PAIRS
+        rows = compare_curves(pairs, args.epoch)
+        if not rows:
+            raise SystemExit("nothing to compare yet — train at least one dropout arm")
+        directory = Path(args.out) if args.out else paths.tables
+        directory.mkdir(parents=True, exist_ok=True)
+        csv_path = directory / "dropout_study_matched_epoch.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        md_path = directory / "dropout_study_matched_epoch.md"
+        md_path.write_text(markdown_curve_table(rows), encoding="utf-8")
+        print(markdown_curve_table(rows))
+        print(f"table    : {csv_path}\nmarkdown : {md_path}")
+        return 0
 
     label = "Validation" if args.split == "val" else args.split.capitalize()
     pairs = [tuple(p) for p in args.pair] if args.pair else DEFAULT_PAIRS
