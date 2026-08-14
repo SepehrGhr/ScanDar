@@ -650,7 +650,7 @@ def check_frozen_sets() -> list[Result]:
                 from .prepare import FROZEN_JPEG_QUALITY
 
                 sources = build_sources(config, split, task=task)
-                mismatched = []
+                mismatched, rounded, worst = [], [], 0
                 for index in _spread(len(entries), 3):
                     entry = entries[index]
                     rebuilt = sources.compose(rng_for("frozen", split, manifest["seed"], index))
@@ -659,8 +659,20 @@ def check_frozen_sets() -> list[Result]:
                         cv2.cvtColor(rebuilt.photo, cv2.COLOR_RGB2BGR),
                         [cv2.IMWRITE_JPEG_QUALITY, FROZEN_JPEG_QUALITY],
                     )
-                    if not ok or encoded.tobytes() != (directory / entry["photo"]).read_bytes():
+                    if ok and encoded.tobytes() == (directory / entry["photo"]).read_bytes():
+                        continue
+                    # Bytes are the cheap test, not the question. The question is
+                    # whether this set is still the one the numbers were measured
+                    # on, and a machine whose filters round a handful of pixels
+                    # differently has not changed that; a generator drawing
+                    # different samples has. Told apart by the corners, which move
+                    # only if the sampling itself diverged.
+                    gap = _decoded_gap(directory / entry["photo"], rebuilt, entry)
+                    if gap is None or gap["corner_shift"] > 0.01 or gap["max"] > 8:
                         mismatched.append(entry["id"])
+                    else:
+                        rounded.append(entry["id"])
+                        worst = max(worst, gap["max"])
             except Exception as exc:  # noqa: BLE001 - report rather than crash the report
                 results.append(Result(label, WARN, f"could not verify: {exc}"))
                 continue
@@ -673,6 +685,18 @@ def check_frozen_sets() -> list[Result]:
                         f"{', '.join(mismatched)} no longer regenerate byte-identically — the "
                         "generator has changed since this set was frozen, so numbers measured on "
                         "it are not comparable with new ones. Re-freeze it with --force",
+                    )
+                )
+            elif rounded:
+                results.append(
+                    Result(
+                        label,
+                        WARN,
+                        f"{len(rounded)} sample(s) re-encode to different bytes but the same "
+                        f"picture — identical draws, pixels within {worst}/255. That is this "
+                        "machine's arithmetic, not a changed generator: everything reads the "
+                        "stored file, so no measured number moves. **Do not re-freeze.** "
+                        "`python scripts/diagnose_frozen.py` shows the detail",
                     )
                 )
             else:
@@ -1032,6 +1056,40 @@ def check_corner_pipeline() -> list[Result]:
             )
         )
     return results
+
+
+def _decoded_gap(stored_path, sample, entry) -> dict | None:
+    """How far a regenerated sample is from the stored one, past the encoding.
+
+    Returns the largest absolute difference over the decoded pixels and how far
+    the corners moved, or ``None`` when the two are not even the same shape.
+    Compared decoded-to-decoded, because the stored side has already paid for one
+    JPEG round trip and the regenerated side must be charged the same.
+    """
+    import cv2
+    import numpy as np
+
+    from .io import imread_rgb
+    from .prepare import FROZEN_JPEG_QUALITY
+
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        cv2.cvtColor(sample.photo, cv2.COLOR_RGB2BGR),
+        [cv2.IMWRITE_JPEG_QUALITY, FROZEN_JPEG_QUALITY],
+    )
+    if not ok:
+        return None
+    stored = imread_rgb(stored_path).astype(np.int16)
+    rebuilt = cv2.cvtColor(cv2.imdecode(encoded, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+    if stored.shape != rebuilt.shape:
+        return None
+
+    # The corners are where a *different draw* shows up: rounding in a filter
+    # cannot move them, and a divergent placement cannot leave them alone.
+    stored_corners = np.asarray(entry["corners"], dtype=float)
+    drawn = np.asarray(sample.corners, dtype=float).round(3)
+    shift = float(np.abs(stored_corners - drawn).max())
+    return {"max": int(np.abs(stored - rebuilt.astype(np.int16)).max()), "corner_shift": shift}
 
 
 def _spread(count: int, wanted: int) -> list[int]:

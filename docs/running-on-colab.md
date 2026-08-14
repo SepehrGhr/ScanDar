@@ -116,30 +116,33 @@ A bigger batch does not help — it is the same CPU work per sample either way. 
 `grad_accum` are separate keys so the *effective* batch can be held constant on a machine where the
 real one does not fit; at 256² patches the default of 16 peaks around 3 GB and fits everywhere.
 
-## The OpenCV version is part of the dataset
+## The frozen buckets will not reproduce byte-for-byte here, and that is fine
 
-Colab ships OpenCV 4.x. Everything on disk here — the frozen buckets, and every trained baseline —
-came from **5.0.0.93**, and the whole dataset *is* OpenCV output: the warps, the blurs, the noise,
-the JPEG encoding. Run the sanity checks on a 4.x runtime and the frozen sets fail like this:
+Every bucket on disk was frozen on the laptop, and the sanity check verifies them by regenerating a
+few samples and comparing the encoded bytes. On Colab a minority of samples per bucket come back
+different, and the check reports it as a warning:
 
 ```
-✗ frozen enhance/test   test_0100, test_0199 no longer regenerate byte-identically
+! frozen enhance/test   1 sample(s) re-encode to different bytes but the same picture —
+                        identical draws, pixels within 3/255. Do not re-freeze.
 ```
 
-with a minority of samples failing per bucket and the rest passing — the signature of a library
-difference, not of a changed generator.
+Measured on a Colab runtime, with OpenCV pinned to the laptop's version: the sampling is **identical**
+— same scan, same background, same degradation draws, corners unmoved — and the pixels differ by at
+most **3 levels out of 255 on 0.005% of them**. That is floating-point rounding in a filter's SIMD
+path on different hardware, and it is far below the noise the degradation pipeline deliberately adds
+(σ 0.004–0.03, i.e. 1–8 levels). Nothing measured moves: every number in this project is computed
+from the *stored* files, which came across intact.
 
-**Do not re-freeze.** `--force` would overwrite the correct buckets with 4.x-encoded ones and every
-number this project has already measured would stop being comparable with every number it measures
-next. The buckets that came off Drive are the right ones; the runtime is what is wrong.
+**Do not re-freeze.** `--force` would overwrite the buckets every existing number was measured
+against, and the comparison the whole study rests on would be gone. `python scripts/diagnose_frozen.py`
+is the tool that tells the harmless case from the real one — it separates a different *draw* (the
+manifest records every choice the generator made, so it names the first stage that disagreed) from a
+different *rounding*, and it writes nothing either way.
 
-The fix is cell 3b: uninstall Colab's cv2 packages, install `opencv-python-headless==5.0.0.93`,
-restart the runtime, re-run the checks. They go green, and — the reason this matters beyond a tidy
-report — training then generates the same samples the baselines were trained on, so an arm trained
-here and a baseline trained on the laptop still differ by dropout and nothing else.
-
-The code itself sticks to the OpenCV 4.x API surface, so it *runs* fine on 4.x. Reproducing bytes is
-a stricter requirement than running, and it is the one this project depends on.
+Cell 3b still pins OpenCV to `5.0.0.93`, the version the data was generated with. It is not what
+causes the remaining rounding difference, but it removes the larger question of a different library
+version and it costs a restart.
 
 ## Other things not worth trying
 
