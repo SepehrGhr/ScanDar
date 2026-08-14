@@ -36,6 +36,14 @@ on the very same 256x256 input the network sees. A learned detector that cannot
 beat a rectangle-finder from before neural networks is not earning its
 parameters either.
 
+And the end-to-end table *(brief §7)*: the whole chain run twice over the same
+photographs, once on the corners the detector found and once on the true ones,
+which prices the detection step in decibels — beside the comparison between those
+predicted corners and the true ones, which is what the bonus is graded on in its
+own right. It can be produced before any fine-tuning has happened, from the two
+finished runs, because "the two networks bolted together" is the baseline the
+fine-tuned chain has to beat.
+
 Which table gets produced is decided by the model's ``output_kind``, so one
 command scores any checkpoint this project produces.
 
@@ -72,7 +80,7 @@ from .metrics import (
 from .model import clamp_image, corners_from_output, load_model
 from .pipelines import tiled_forward
 
-__all__ = ["evaluate_enhancement", "evaluate_corners", "main"]
+__all__ = ["evaluate_enhancement", "evaluate_corners", "evaluate_scan", "main"]
 
 SPLIT_LABELS = {"train": "Training", "val": "Validation", "test": "Test"}
 
@@ -418,6 +426,275 @@ def write_corner_tables(results: dict, name: str, directory: Path | None = None)
 
 
 # ---------------------------------------------------------------------------
+# the end-to-end chain  (brief §7, the bonus)
+# ---------------------------------------------------------------------------
+def evaluate_scan(
+    detector,
+    enhancer,
+    config: Config,
+    splits=("test",),
+    device=None,
+    limit: int | None = None,
+    tile: int = 512,
+    overlap: int = 192,
+    out_width: int = 1024,
+    threshold_pct: float = PCK_THRESHOLD_PCT,
+    progress: bool = True,
+) -> dict:
+    """Score the whole chain, twice, on the frozen synthetic photos *(brief §7)*.
+
+    The chain is run **once with the corners the detector found and once with the
+    true ones**, on the same photographs, through the same rectification and the
+    same tiled enhancement. That pairing is the point of this table. The
+    annotated-corner arm is what the enhancement network can do when the page is
+    handed to it correctly — the enhancement table's number, reached through the
+    scanner's own code path — and the gap between the two arms is the price of
+    the detector's error, in decibels, which is a far more useful thing to know
+    than either arm alone.
+
+    Alongside it, and on the same photos, the comparison the bonus is graded on
+    in its own right: **predicted corners against the true corners**, in the
+    detector's 256x256 space so the numbers read against the detector table.
+
+    Both restoration arms are scored against one fixed target — the clean scan
+    rectified with the true corners — so a wrong warp is punished as
+    misalignment, which is exactly what it is downstream.
+
+    A note the report must carry: these are the *enhancement* frozen buckets,
+    which is the right choice because they are the only ones whose restoration
+    target is achievable, and they contain **no distractor sheets**. The detector
+    therefore scores better here than it does on its own bucket.
+    """
+    from .datasets import frozen_dataset
+    from .geometry import normalize_corners
+    from .metrics import corner_metrics
+    from .pipelines import A4_ASPECT, scan_document
+
+    device = device if device is not None else get_device()
+    input_size = int(config.data.get("corner_input", 256))
+    rect_size = tuple(config.data.get("rect_size", (1024, 1448)))
+    detector.eval().to(device)
+    enhancer.eval().to(device)
+
+    results: dict[str, dict] = {}
+    for split in splits:
+        dataset = frozen_dataset(config, split, task="scan", mode="page")
+        arms = {"predicted": MetricAccumulator(), "annotated": MetricAccumulator()}
+        baseline = MetricAccumulator()
+        corners_scored = MetricAccumulator()
+        per_sample: list[dict] = []
+        sources: dict[str, int] = {}
+
+        count = len(dataset.entries) if limit is None else min(limit, len(dataset.entries))
+        for index in range(count):
+            sample = dataset.sample_at(index)
+            entry = dataset.entries[index]
+            photo = sample.photo
+            canvas = (photo.shape[1], photo.shape[0])
+
+            # The target and the do-nothing baseline, both from the true corners
+            # and both at the resolution the chain writes at.
+            height = max(1, round(out_width / A4_ASPECT))
+            degraded, target = sample.rectify((out_width, height))
+            target_t = _image_tensor(target, device)
+            baseline.add("psnr", psnr(_image_tensor(degraded, device), target_t, reduction="none"))
+            baseline.add(
+                "ssim", ssim_metric(_image_tensor(degraded, device), target_t, reduction="none")
+            )
+
+            row = {"id": entry["id"], "scan": entry["scan"]}
+            predicted_norm = None
+            for arm, given in (("predicted", None), ("annotated", sample.corners)):
+                result = scan_document(
+                    photo,
+                    detector if given is None else None,
+                    enhancer,
+                    device=device,
+                    input_size=input_size,
+                    out_width=out_width,
+                    aspect="a4",
+                    corners=given,
+                    tile=tile,
+                    overlap=overlap,
+                )
+                scanned = _image_tensor(result["scan"], device)
+                arm_psnr = psnr(scanned, target_t, reduction="none")
+                arm_ssim = ssim_metric(scanned, target_t, reduction="none")
+                arms[arm].add("psnr", arm_psnr)
+                arms[arm].add("ssim", arm_ssim)
+                row[f"{arm}_psnr"] = round(float(arm_psnr[0]), 4)
+                row[f"{arm}_ssim"] = round(float(arm_ssim[0]), 4)
+                if given is None:
+                    sources[result["source"]] = sources.get(result["source"], 0) + 1
+                    row["source"] = result["source"]
+                    predicted_norm = torch.from_numpy(result["normalised"])[None]
+
+            truth = torch.from_numpy(normalize_corners(sample.corners, canvas))[None]
+            metrics = corner_metrics(
+                predicted_norm, truth, size=input_size, threshold_pct=threshold_pct
+            )
+            corners_scored.update(metrics)
+            row.update(
+                {
+                    "corner_err": round(float(metrics["corner_err"][0]), 4),
+                    "corner_pct": round(float(metrics["corner_pct"][0]), 4),
+                    "pck": int(metrics["pck"][0]),
+                    "quad_iou": round(float(metrics["quad_iou"][0]), 4),
+                    "psnr_cost": round(row["annotated_psnr"] - row["predicted_psnr"], 4),
+                }
+            )
+            per_sample.append(row)
+
+            if progress and (index + 1) % 10 == 0:
+                print(
+                    f"  {split:<5} {index + 1:>4}/{count}"
+                    f"  psnr {arms['predicted'].mean('psnr'):.2f} dB"
+                    f"  (true corners {arms['annotated'].mean('psnr'):.2f})"
+                    f"  corners {corners_scored.mean('corner_err'):.2f} px"
+                )
+
+        results[split] = {
+            "n": len(per_sample),
+            "rect_size": [int(rect_size[0]), int(rect_size[1])],
+            "input": baseline.summary(),
+            "predicted": arms["predicted"].summary(),
+            "annotated": arms["annotated"].summary(),
+            "corners": corners_scored.summary(),
+            "corner_sources": sources,
+            "per_sample": per_sample,
+        }
+    return results
+
+
+def _image_tensor(image, device) -> torch.Tensor:
+    """An RGB uint8 page as the ``(1, 3, H, W)`` float tensor the metrics take."""
+    import numpy as np
+
+    array = np.ascontiguousarray(image.transpose(2, 0, 1))
+    return torch.from_numpy(array).to(device).to(torch.float32).div_(255.0)[None]
+
+
+def scan_markdown_table(results: dict, threshold_pct=PCK_THRESHOLD_PCT) -> str:
+    """The bonus's two tables: what the chain produced, and how it found the page."""
+    lines = [
+        "| Split | corners | PSNR (dB) | SSIM | true corners | cost of detection |",
+        "| :--- | :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for split, entry in results.items():
+        predicted, annotated, base = entry["predicted"], entry["annotated"], entry["input"]
+        cost = predicted.get("psnr", float("nan")) - annotated.get("psnr", float("nan"))
+        label = SPLIT_LABELS.get(split, split)
+        lines.append(
+            f"| {label} | detected "
+            f"| {predicted.get('psnr', float('nan')):.2f} ± "
+            f"{predicted.get('psnr_std', float('nan')):.2f} "
+            f"| {predicted.get('ssim', float('nan')):.4f} "
+            f"| {annotated.get('psnr', float('nan')):.2f} "
+            f"| **{cost:+.2f} dB** |"
+        )
+        lines.append(
+            f"| {label} | *degraded input, true corners* "
+            f"| *{base.get('psnr', float('nan')):.2f}* "
+            f"| *{base.get('ssim', float('nan')):.4f}* | | |"
+        )
+    lines += [
+        "",
+        "Photo in, clean scan out, with no human input: the detector finds the page, the "
+        "chain flattens it and the enhancement network restores it. Both arms are scored "
+        "against the same target — the clean scan rectified with the true corners — so a "
+        "misplaced corner is punished as the misalignment it is. The last column is what "
+        "the detection step costs against being handed the page correctly.",
+        "",
+        f"| Split | corner error (px @256) | % of diagonal | PCK@{threshold_pct:g}% | quad IoU |",
+        "| :--- | ---: | ---: | ---: | ---: |",
+    ]
+    for split, entry in results.items():
+        corners = entry["corners"]
+        lines.append(
+            f"| {SPLIT_LABELS.get(split, split)} "
+            f"| {corners.get('corner_err', float('nan')):.2f} ± "
+            f"{corners.get('corner_err_std', float('nan')):.2f} "
+            f"| {corners.get('corner_pct', float('nan')):.2f}% "
+            f"| {corners.get('pck', float('nan')):.3f} "
+            f"| {corners.get('quad_iou', float('nan')):.4f} |"
+        )
+    lines += [
+        "",
+        "The corners the chain actually used, against the true ones, on the same photos it "
+        "was scored on above. These are the **enhancement** frozen buckets, which carry no "
+        "distractor sheet, so a detector scores better here than on its own bucket — the "
+        "numbers are not interchangeable with the detector table's.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def scan_table_rows(results: dict) -> list[dict]:
+    """Long-form rows: one per split per arm."""
+    rows = []
+    for split, entry in results.items():
+        for variant, key in (
+            ("degraded input", "input"),
+            ("chain, detected corners", "predicted"),
+            ("chain, true corners", "annotated"),
+        ):
+            scores = entry[key]
+            rows.append(
+                {
+                    "split": SPLIT_LABELS.get(split, split),
+                    "variant": variant,
+                    "n": entry["n"],
+                    "psnr": round(scores.get("psnr", float("nan")), 3),
+                    "psnr_std": round(scores.get("psnr_std", float("nan")), 3),
+                    "ssim": round(scores.get("ssim", float("nan")), 4),
+                    "corner_err_px": round(entry["corners"].get("corner_err", float("nan")), 3)
+                    if key == "predicted"
+                    else "",
+                    "pck": round(entry["corners"].get("pck", float("nan")), 4)
+                    if key == "predicted"
+                    else "",
+                    "quad_iou": round(entry["corners"].get("quad_iou", float("nan")), 4)
+                    if key == "predicted"
+                    else "",
+                }
+            )
+    return rows
+
+
+def write_scan_tables(results: dict, name: str, directory: Path | None = None) -> dict[str, Path]:
+    """CSV, Markdown and the per-sample scores for the end-to-end chain."""
+    import csv
+
+    directory = Path(directory or paths.tables)
+    directory.mkdir(parents=True, exist_ok=True)
+    written = {}
+
+    rows = scan_table_rows(results)
+    csv_path = directory / f"{name}_scan.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    written["csv"] = csv_path
+
+    markdown_path = directory / f"{name}_scan.md"
+    markdown_path.write_text(
+        f"### {name}\n\n" + scan_markdown_table(results), encoding="utf-8"
+    )
+    written["markdown"] = markdown_path
+
+    per_sample = [dict(row, split=split) for split, e in results.items() for row in e["per_sample"]]
+    if per_sample:
+        detail_path = directory / f"{name}_scan_per_sample.csv"
+        with open(detail_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(per_sample[0]))
+            writer.writeheader()
+            writer.writerows(per_sample)
+        written["per_sample"] = detail_path
+
+    return written
+
+
+# ---------------------------------------------------------------------------
 # tables
 # ---------------------------------------------------------------------------
 def table_rows(results: dict) -> list[dict]:
@@ -517,6 +794,122 @@ def _find_checkpoint(args) -> Path:
     return candidate
 
 
+def _load_untrained_scanner(config: Config, device):
+    """The chain assembled from two finished runs, with no fine-tuning on top.
+
+    This is the *before* column of the bonus's before-and-after, and it has to be
+    scoreable without a scanner checkpoint existing — the whole question is
+    whether fine-tuning the chain end to end improves on simply bolting the two
+    trained networks together, and half of that comparison is the bolt-together.
+    """
+    from .model import build_model
+
+    model = build_model(config)
+    if not hasattr(model, "load_components"):
+        raise SystemExit(
+            f"{config.get('run', {}).get('name')} is not an end-to-end run — "
+            "give --checkpoint instead"
+        )
+    for role, path in model.load_components().items():
+        print(f"init      : {role} from {path}")
+    return model.to(device).eval()
+
+
+def _run_detector_evaluation(model, config: Config, args, device, name: str, run_dir: Path) -> int:
+    """Score a corner detector and write its tables. Shared by every entry path.
+
+    Including the one that reaches inside a chained scanner, so a fine-tuned
+    detector is measured on exactly the bucket and by exactly the code its
+    baseline was.
+    """
+    input_size = int(config.data.get("corner_input", 256))
+    kind = str(getattr(model, "output_kind", "coords"))
+    print(f"detector  : {type(model).__name__}, {kind} at {input_size}x{input_size}\n")
+    corner_results = evaluate_corners(
+        model,
+        config,
+        splits=tuple(args.splits),
+        device=device,
+        limit=args.limit,
+        baseline=not args.no_baseline,
+    )
+    print("\n" + corner_markdown_table(corner_results))
+    written = write_corner_tables(corner_results, name, directory=args.out)
+    for label, path in written.items():
+        print(f"{label:<10}: {path}")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        run_dir / "evaluation.json",
+        {
+            "run": name,
+            "task": "corner",
+            "input_size": input_size,
+            "splits": {
+                split: {
+                    key: entry[key]
+                    for key in ("n", "model", "baseline", "baseline_undetected", "pck_curve")
+                }
+                for split, entry in corner_results.items()
+            },
+        },
+    )
+    return 0
+
+
+def _run_scan_evaluation(
+    scanner,
+    config: Config,
+    args,
+    device,
+    name: str,
+    run_dir: Path,
+    json_name: str = "evaluation_scan.json",
+) -> int:
+    """Score a chained scanner and write its tables. Shared by both entry paths.
+
+    *json_name* separates the two arms that share a run directory: the fine-tuned
+    chain's numbers and the assembled chain's baseline are both about
+    ``corner_heat_e2e``, and one silently overwriting the other would destroy
+    exactly the before-and-after the bonus is reported as.
+    """
+    splits = tuple(args.splits)
+    print(f"scanner   : {type(scanner.detector).__name__} -> {type(scanner.enhancer).__name__}\n")
+    results = evaluate_scan(
+        scanner.detector,
+        scanner.enhancer,
+        config,
+        splits=splits,
+        device=device,
+        limit=args.limit,
+        tile=args.tile,
+        overlap=args.overlap,
+        out_width=args.width,
+    )
+    print("\n" + scan_markdown_table(results))
+    written = write_scan_tables(results, name, directory=args.out)
+    for label, path in written.items():
+        print(f"{label:<10}: {path}")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        run_dir / json_name,
+        {
+            "task": "scan",
+            "run": name,
+            "out_width": args.width,
+            "splits": {
+                split: {
+                    key: entry[key]
+                    for key in ("n", "input", "predicted", "annotated", "corners", "corner_sources")
+                }
+                for split, entry in results.items()
+            },
+        },
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="evaluate.py", description="Score a trained ScanDar model."
@@ -536,10 +929,52 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out", default=None, help="table directory (default reports/tables)")
     parser.add_argument("--name", default=None, help="table name (default: the run name)")
+    parser.add_argument(
+        "--width", type=int, default=1024, help="rectified page width for the end-to-end table"
+    )
+    parser.add_argument(
+        "--assembled",
+        action="store_true",
+        help="score the chain as assembled from its two finished runs, ignoring any fine-tune",
+    )
+    parser.add_argument(
+        "--part",
+        choices=("scanner", "detector"),
+        default="scanner",
+        help="score the whole chain, or only the detector inside it, on the corner buckets",
+    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
-    checkpoint_path = _find_checkpoint(args)
     device = get_device()
+
+    # The end-to-end chain is scoreable before it has ever been fine-tuned —
+    # that is the "before" half of the comparison the bonus asks for — so a
+    # missing checkpoint is a legitimate state here rather than an error, and
+    # --assembled asks for that baseline once the fine-tuned checkpoint exists.
+    if args.config and not args.checkpoint:
+        config = load_config(args.config, overrides=args.overrides)
+        name = str(config.get("run", {}).get("name") or Path(config["_config_path"]).stem)
+        trained = (paths.run_dir(name) / args.weights).exists()
+        if str(config.get("task", "")) == "scan" and (args.assembled or not trained):
+            print(
+                "checkpoint: "
+                + ("ignored (--assembled)" if trained else "none yet")
+                + " — scoring the chain as assembled, not fine-tuned"
+            )
+            print(f"device    : {describe_device(device)}\n")
+            scanner = _load_untrained_scanner(config, device)
+            if args.part == "detector":
+                return _run_detector_evaluation(
+                    scanner.detector, config, args, device,
+                    name=args.name or f"{name}_assembled", run_dir=paths.run_dir(name),
+                )
+            return _run_scan_evaluation(
+                scanner, config, args, device,
+                name=args.name or f"{name}_assembled", run_dir=paths.run_dir(name),
+                json_name="evaluation_scan_assembled.json",
+            )
+
+    checkpoint_path = _find_checkpoint(args)
     model, config = load_model(checkpoint_path, device=device)
     # The checkpoint carries the config it trained with, which is the one that has
     # to be used to rebuild the model. Overrides still apply on top, so an
@@ -553,37 +988,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"checkpoint: {checkpoint_path}")
     print(f"device    : {describe_device(device)}")
 
+    if kind == "scan" and args.part == "scanner":
+        return _run_scan_evaluation(
+            model, config, args, device, name=name, run_dir=checkpoint_path.parent
+        )
+
+    if kind == "scan":
+        # The detector on its own bucket, which is *harder* than the chain's:
+        # distractor sheets, tinted stock, curled pages. Fine-tuning the chain
+        # happens on the enhancement distribution, which has none of those, so
+        # "did the fine-tune cost the detector anything on the world it was
+        # trained for" is a question that has to be asked separately.
+        return _run_detector_evaluation(
+            model.detector, config, args, device, name=name, run_dir=checkpoint_path.parent
+        )
+
     if kind in ("coords", "heatmaps"):
-        input_size = int(config.data.get("corner_input", 256))
-        print(f"detector  : {type(model).__name__}, {kind} at {input_size}x{input_size}\n")
-        corner_results = evaluate_corners(
-            model,
-            config,
-            splits=tuple(args.splits),
-            device=device,
-            limit=args.limit,
-            baseline=not args.no_baseline,
+        return _run_detector_evaluation(
+            model, config, args, device, name=name, run_dir=checkpoint_path.parent
         )
-        print("\n" + corner_markdown_table(corner_results))
-        written = write_corner_tables(corner_results, name, directory=args.out)
-        for label, path in written.items():
-            print(f"{label:<10}: {path}")
-        write_json(
-            checkpoint_path.parent / "evaluation.json",
-            {
-                "checkpoint": str(checkpoint_path),
-                "task": "corner",
-                "input_size": input_size,
-                "splits": {
-                    split: {
-                        key: entry[key]
-                        for key in ("n", "model", "baseline", "baseline_undetected", "pck_curve")
-                    }
-                    for split, entry in corner_results.items()
-                },
-            },
-        )
-        return 0
 
     print(f"pages     : {'whole-page pass' if not args.tile else f'{args.tile}px tiles, {args.overlap}px overlap'}\n")
 
