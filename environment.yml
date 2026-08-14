@@ -19,6 +19,7 @@ channels:
 dependencies:
   - python=3.11
   - pip
+  - tesseract   # the OCR engine binary itself; pytesseract below is only the wrapper
 
   - pip:
       # CUDA 12.1 build of PyTorch — matches the local RTX 3060 setup
@@ -35,9 +36,9 @@ dependencies:
       - tqdm>=4.66
       - pytest>=8
       - ipykernel>=6
+      - pytesseract>=0.3.10   # OCR readability study *(brief §3.3)*; needs the tesseract binary too:
+                              #   conda install -c conda-forge tesseract
 
       # Not needed until the part of the project that uses them; uncomment then:
-      # - pytesseract>=0.3.10   # OCR readability study; needs the tesseract binary:
-      #                         #   conda install -c conda-forge tesseract
       # - kornia>=0.7           # differentiable warping, for the end-to-end scanner
       # - gradio>=4             # the demo app

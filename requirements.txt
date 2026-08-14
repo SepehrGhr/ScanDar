@@ -17,9 +17,9 @@ matplotlib>=3.8
 pandas>=2.0
 tqdm>=4.66
 pytest>=8
+pytesseract>=0.3.10   # OCR readability study *(brief §3.3)*; also needs the tesseract binary:
+                      #   conda install -c conda-forge tesseract   (no sudo needed)
 
 # --- installed later, when the part that needs them is built ---
-# OCR readability study:  pytesseract>=0.3.10   + the tesseract binary
-#                         conda install -c conda-forge tesseract   (no sudo needed)
 # end-to-end scanner:     kornia>=0.7           (differentiable warping)
 # demo app:               gradio>=4
