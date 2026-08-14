@@ -38,7 +38,7 @@ dependencies:
       - ipykernel>=6
       - pytesseract>=0.3.10   # OCR readability study *(brief §3.3)*; needs the tesseract binary too:
                               #   conda install -c conda-forge tesseract
+      - gradio>=4             # app/demo.py
 
       # Not needed until the part of the project that uses them; uncomment then:
       # - kornia>=0.7           # differentiable warping, for the end-to-end scanner
-      # - gradio>=4             # the demo app

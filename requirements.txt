@@ -19,7 +19,7 @@ tqdm>=4.66
 pytest>=8
 pytesseract>=0.3.10   # OCR readability study *(brief §3.3)*; also needs the tesseract binary:
                       #   conda install -c conda-forge tesseract   (no sudo needed)
+gradio>=4             # app/demo.py
 
 # --- installed later, when the part that needs them is built ---
 # end-to-end scanner:     kornia>=0.7           (differentiable warping)
-# demo app:               gradio>=4
