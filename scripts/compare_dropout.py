@@ -146,6 +146,41 @@ def read_curve(name: str) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
+def curve_agrees_with_table(name: str, key: str, curve: list[dict], directory=None) -> float | None:
+    """How far a run's last logged validation number is from its evaluated one.
+
+    A per-epoch log is only comparable across runs if the number in it means the
+    same thing in both, and that is not guaranteed by the column name. ``corner_heat``
+    is the case in point: it was trained before the corner extraction was fixed, so
+    its log records 6.26 px where re-evaluating the same checkpoint with today's
+    code gives 0.70. Its curve cannot be read against a curve logged after the fix,
+    and nothing about the two files says so.
+
+    Re-evaluating the run *is* the test — ``evaluate.py`` recomputes with current
+    code, so a log that disagrees with its own table was written by different code.
+    Returns the ratio, or ``None`` when there is no table to check against.
+    """
+    suffix = "corners" if key == "val_corner_err" else "restoration"
+    table = read_table_for(name, suffix, directory)
+    if table is None:
+        return None
+    column = {"val_corner_err": "corner_err_px", "val_psnr": "psnr"}[key]
+    variant = TASKS[suffix]["variant"]
+    for row in table:
+        if row["split"] == "Validation" and row["variant"] == variant:
+            logged, evaluated = float(curve[-1][key]), float(row[column])
+            return max(logged, evaluated) / max(min(logged, evaluated), 1e-9)
+    return None
+
+
+def read_table_for(name: str, suffix: str, directory=None):
+    path = Path(directory or paths.tables) / f"{name}_{suffix}.csv"
+    if not path.exists():
+        return None
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
 def at_epoch(curve: list[dict], epoch: int) -> dict:
     for row in curve:
         if int(row["epoch"]) == epoch:
@@ -178,6 +213,26 @@ def compare_curves(pairs, epoch: int | None = None) -> list[dict]:
         if key is None:
             raise SystemExit(f"{arm_name} logs neither of {sorted(CURVE_METRICS)}")
         label, direction, digits = CURVE_METRICS[key]
+
+        # Refuse the comparison outright when a log does not agree with its own
+        # re-evaluation. Printing a number with a caveat under it invites the
+        # number to be quoted without the caveat, and this one would be wrong by
+        # a factor of nine.
+        stale = [
+            (run, ratio)
+            for run in (base_name, arm_name)
+            for ratio in [curve_agrees_with_table(run, key, read_curve(run))]
+            if ratio is not None and ratio > 1.5
+        ]
+        if stale:
+            for run, ratio in stale:
+                print(
+                    f"refused  : {base_name} vs {arm_name} — {run}'s log disagrees with its own "
+                    f"evaluation by {ratio:.1f}x, so it was written by different code and its "
+                    "curve is not comparable with a curve written by this one. Compare these two "
+                    "on the evaluation tables instead, and mind the epoch difference."
+                )
+            continue
 
         # The last epoch the *arm* reached, which is the last one both ran.
         matched = epoch or min(int(arm_curve[-1]["epoch"]), int(base_curve[-1]["epoch"]))

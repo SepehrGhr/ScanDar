@@ -1,0 +1,3 @@
+model,arm,epoch,metric,baseline,dropout,change,better,baseline_val_minus_train_loss,dropout_val_minus_train_loss
+enhance_realistic,enhance_dropout,8,validation PSNR (dB),25.35,25.42,0.07,dropout,0.00359,0.00222
+corner_reg,corner_reg_dropout,10,validation corner error (px @256),4.56,5.66,-1.11,baseline,-0.00143,-0.00601

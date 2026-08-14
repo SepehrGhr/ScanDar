@@ -1,0 +1,7 @@
+split,variant,n,psnr,psnr_std,ssim,ssim_std
+Training,degraded input,200,14.696,5.083,0.8466,0.0658
+Training,enhanced,200,25.749,2.488,0.9439,0.0304
+Validation,degraded input,200,15.032,5.317,0.8542,0.066
+Validation,enhanced,200,25.699,2.294,0.9447,0.0306
+Test,degraded input,200,15.305,4.878,0.8489,0.0643
+Test,enhanced,200,25.6,2.146,0.9444,0.0274

@@ -191,7 +191,17 @@ def main() -> int:
     parser.add_argument("--runs", nargs="+", default=list(DEFAULT_RUNS))
     parser.add_argument("--split", default="test", help="which frozen bucket to compare on")
     parser.add_argument("--no-gallery", action="store_true", help="table and curve only")
+    parser.add_argument(
+        "--name", default=None,
+        help="a name for this comparison's outputs, so a second comparison does not overwrite "
+             "the first — the detector comparison keeps the unprefixed names",
+    )
     args = parser.parse_args()
+
+    # The head-to-head between the two formulations is *the* corner comparison and
+    # owns the plain filenames; anything else asks for a name and gets its own.
+    table_name = args.name or "corner_comparison"
+    figure_prefix = f"{args.name}_" if args.name else ""
 
     label = args.split.capitalize() if args.split != "val" else "Validation"
     rows = comparison_rows(args.runs, split=label)
@@ -202,8 +212,8 @@ def main() -> int:
     print("\n" + table)
 
     paths.tables.mkdir(parents=True, exist_ok=True)
-    (paths.tables / "corner_comparison.md").write_text(table, encoding="utf-8")
-    with open(paths.tables / "corner_comparison.csv", "w", newline="", encoding="utf-8") as handle:
+    (paths.tables / f"{table_name}.md").write_text(table, encoding="utf-8")
+    with open(paths.tables / f"{table_name}.csv", "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
@@ -214,13 +224,14 @@ def main() -> int:
     curve = pck_curves(
         {name: [r for r in read_table(name, "pck_curve") if r["split"] == args.split]
          for name in args.runs},
-        figures / "pck_curves.png",
+        figures / f"{figure_prefix}pck_curves.png",
     )
 
-    print(f"table   : {paths.tables / 'corner_comparison.md'}")
+    print(f"table   : {paths.tables / f'{table_name}.md'}")
     print(f"curve   : {curve}")
     if not args.no_gallery:
-        print(f"gallery : {failure_gallery(args.runs, figures / 'failure_cases.png', args.split)}")
+        gallery = failure_gallery(args.runs, figures / f"{figure_prefix}failure_cases.png", args.split)
+        print(f"gallery : {gallery}")
     return 0
 
 

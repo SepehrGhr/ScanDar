@@ -2,8 +2,11 @@
 
 The brief asks one question here *(brief §6)*: add dropout, retrain, and say what it does — in
 particular whether the gap between what the model scores on synthetic data and what it scores on real
-photographs gets smaller. This page is what was set up to answer it, written before any arm had
-trained, so that the design can be read separately from the result.
+photographs gets smaller. This page was written before any arm had trained, so that the design can be
+read separately from the result; [the result](#the-result) is at the bottom, and it is a null one.
+
+**In one line: dropout changes nothing worth having on the synthetic metrics, and the model the
+prediction named as most likely to benefit is the one it measurably hurt.**
 
 Everything the study needs already existed. `dropout` is wired through `ConvBlock` and both U-Nets,
 `bottleneck_dropout` selects the bottleneck alone, and `CornerRegNet` takes `fc_dropout` separately
@@ -156,3 +159,106 @@ and `.md`, one row per model and metric, with two columns that matter:
 
 Arms that have not been evaluated yet are skipped with a note rather than failing, so the table is
 readable while the remaining arms are still training.
+
+---
+
+## The result
+
+Three arms ran, all shortened with `stop_after_epoch` as described above: `corner_reg_dropout` to
+epoch 10, `corner_heat_dropout` and `enhance_dropout` to epoch 8, against baselines that ran the
+full 20. About 3 hours of GPU time in total. The two `_wide` placement arms were not run.
+
+### At a matched epoch, which is the comparison that is controlled
+
+Identical schedule, identical data, identical seed, identical learning rate at that step — dropout is
+the only difference. Validation, on the frozen bucket, from each run's own per-epoch log:
+
+| Model | epoch | metric | baseline | with dropout | change | val−train loss |
+| :--- | ---: | :--- | ---: | ---: | ---: | :--- |
+| `enhance_realistic` → `enhance_dropout` | 8 | validation PSNR | 25.35 dB | **25.42 dB** | +0.07 | 0.0036 → 0.0022 |
+| `corner_reg` → `corner_reg_dropout` | 10 | validation corner error | 4.56 px | **5.66 px** | −1.11 | −0.0014 → −0.0060 |
+
+**The enhancement network does not care.** 0.07 dB is inside the run-to-run noise of this setup, and
+the sign is if anything the wrong way round for the prediction, which expected a small loss. The
+val−train loss distance was already 0.0036 — three parts in a thousand — and dropout moved it to
+0.0022, which is a smaller number and not a meaningful one: neither value describes a model that is
+overfitting.
+
+**The coordinate regressor is worse by a quarter of its own error**, at the same step, with the same
+data. That is the clearest single result in this study, and it is the opposite of what was predicted.
+
+`corner_heat` could not be compared this way, and the comparison tool refuses to try: that baseline
+trained before the corner extraction was fixed, so its log records 6.26 px where re-evaluating the
+same checkpoint with current code gives 0.70 px. Its per-epoch curve and a curve logged today do not
+measure the same quantity, and the 8.9× disagreement between the log and its own re-evaluation is how
+the tool detects that without being told.
+
+### On the frozen test bucket, where the schedules do not match
+
+Every row here compares a 20-epoch baseline against an 8- or 10-epoch arm, so **the accuracy columns
+are not evidence about dropout** — they are mostly evidence about training length, and they are
+recorded for completeness rather than for argument. The gap column is the one that survives, because
+it is computed within a single run.
+
+| Run | epochs | test | train→test gap |
+| :--- | ---: | ---: | ---: |
+| `enhance_realistic` | 20 | 26.67 dB / 0.9533 SSIM | 0.14 dB |
+| `enhance_dropout` | 8 | 25.60 dB / 0.9444 SSIM | 0.15 dB |
+| `corner_reg` | 20 | 3.16 px / PCK 0.830 | −0.06 px |
+| `corner_reg_dropout` | 10 | 6.12 px / PCK 0.405 | −0.03 px |
+| `corner_heat` | 20 | 1.06 px / PCK 0.955 | 0.27 px |
+| `corner_heat_dropout` | 8 | 1.91 px / PCK 0.905 | −0.17 px |
+
+The gap does not close, because there was no gap. It was 0.14 dB and it stayed 0.15; it was already
+*negative* for the regressor — better on test than on training — and stayed negative. A regulariser
+cannot recover generalisation that was never lost, and this is what that looks like when it is
+measured rather than assumed.
+
+Two things in that table are worth reading on their own terms. `corner_heat_dropout` reaches 1.91 px
+in **8** epochs against the baseline's 1.06 px in 20, which says more about how quickly the heatmap
+formulation converges than about dropout. And `corner_reg_dropout`'s PCK falls to 0.405 while its
+mean error only doubles: the failures are concentrated, not spread — a few photos where one corner
+goes badly wrong, which is exactly the shape of damage that injecting noise into a low-dimensional
+coordinate estimate produces.
+
+### Scoring the prediction
+
+`reports/PREDICTIONS.md` §2 was committed before any of this ran, and it is scored here as written,
+the same way the detector comparison was.
+
+| Predicted | Outcome |
+| :--- | :--- |
+| Dropout buys approximately nothing on the synthetic metrics for the enhancement network | **Right.** +0.07 dB at a matched epoch. |
+| …and slightly *hurts* them | **Wrong**, though only just: the sign came out marginally positive rather than marginally negative. Both readings mean "nothing". |
+| The corner detectors are more likely to benefit, and `CornerRegNet` most of all | **Wrong, and wrong about the model it was most confident about.** The regressor is the one arm that clearly lost: −1.11 px at a matched epoch. |
+| The gap between train and unseen data shrinks | **Not testable as posed** — the gap was ~0 in every baseline before dropout, so there was nothing to shrink. |
+| If dropout helps anywhere it helps on the real photos | **Still untested**, and blocked on the reference scans and the corner annotations. |
+
+The reasoning behind the prediction was that `CornerRegNet`'s fully connected head — 8.4 M weights,
+four fifths of the model — is the one genuinely over-parameterised map in the project, so it should
+be the one dropout rescues. The parameter count was right and the inference from it was wrong, for a
+reason worth keeping:
+
+**Over-parameterised is not the same as over-fitting.** That head is large because it has to learn a
+dense map from feature position to coordinate, and it is trained on a generator that never repeats a
+sample, so it never gets the chance to memorise anything. What dropout does there is not remove
+memorisation — there is none — but inject multiplicative noise directly into a *low-dimensional
+continuous* estimate. Eight numbers come out; there is no spatial pooling downstream to average the
+noise away, and no redundancy to route around it. In the two U-Nets the same rate lands on a
+bottleneck of 512 heavily redundant channels with skip connections carrying detail around it, which
+is why they shrug it off.
+
+So the brief's "classic place for dropout" is, in this project, the worst place for it — and the
+reason is not that dropout is a bad idea but that this model was never doing the thing dropout fixes.
+
+### What would change this answer
+
+Nothing in the synthetic half. The result is a null, the mechanism for the null is measured
+(no train-to-test gap anywhere, in any baseline, before any arm ran), and running the arms to 20
+epochs would sharpen the accuracy columns without touching that conclusion.
+
+The real-photo half is a different question and is still open. When the reference scans and the
+Roboflow export land, the same checkpoints get scored on the 19 real photos and the
+synthetic-to-real gap becomes a number for both the baselines and the arms — no retraining. That is
+the half where the prediction's one untested claim lives, and it is the half the brief actually asks
+about, so the write-up says so rather than presenting this page as a complete answer to §6.

@@ -232,3 +232,32 @@ def test_an_arm_that_has_not_been_evaluated_yet_is_skipped_not_fatal(tmp_path, c
 
     assert compare_dropout.compare([("nothing", "nowhere")], directory=tmp_path) == []
     assert "no evaluation table yet" in capsys.readouterr().out
+
+
+def test_a_log_that_disagrees_with_its_own_evaluation_is_not_compared(tmp_path):
+    """A per-epoch log is only comparable across runs if the number in it means
+    the same thing in both, and the column name does not promise that. The
+    heatmap detector's baseline trained before the corner extraction was fixed:
+    its log says 6.26 px where re-evaluating the same weights says 0.70. Printing
+    that difference as a dropout effect would be off by a factor of nine."""
+    import compare_dropout
+
+    _write_corner_table(tmp_path, "stale_run", [
+        {"split": "Validation", "variant": "detector", "n": "200", "corner_err_px": "0.70",
+         "corner_err_std": "0.8", "corner_err_pct": "0.2", "worst_corner_px": "1.4",
+         "pck": "0.98", "quad_iou": "0.98"},
+    ])
+    curve = [{"epoch": "1", "val_corner_err": "6.26", "val_loss": "0.1", "train_loss": "0.1"}]
+
+    ratio = compare_dropout.curve_agrees_with_table("stale_run", "val_corner_err", curve, tmp_path)
+    assert ratio == pytest.approx(6.26 / 0.70, rel=1e-3)
+    assert ratio > 1.5  # the threshold the comparison refuses above
+
+    # A run whose log and table agree is compared as normal.
+    _write_corner_table(tmp_path, "fresh_run", [
+        {"split": "Validation", "variant": "detector", "n": "200", "corner_err_px": "2.72",
+         "corner_err_std": "1.8", "corner_err_pct": "0.75", "worst_corner_px": "4.7",
+         "pck": "0.87", "quad_iou": "0.96"},
+    ])
+    fresh = [{"epoch": "1", "val_corner_err": "2.72", "val_loss": "0.1", "train_loss": "0.1"}]
+    assert compare_dropout.curve_agrees_with_table("fresh_run", "val_corner_err", fresh, tmp_path) < 1.5
