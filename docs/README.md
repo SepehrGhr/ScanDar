@@ -13,11 +13,13 @@ project: what it is for, how it does its job, and which decisions were deliberat
 | [Corner detection](corner-detection.md) | The same problem solved twice — coordinate regression against heatmap regression — the losses and metrics that compare them, and the classical guardrail behind the inference pipeline. |
 | [The end-to-end scanner](end-to-end-scanner.md) | The bonus *(brief §7)*: the two networks chained, the warp rebuilt in torch so the enhancement loss reaches the detector's corners, and how the chain is scored twice to price the detection step. |
 | [The dropout study](dropout-study.md) | The regularisation experiment *(brief §6)*: the arms, the rule that keeps them comparable, and the null result they produced — including why the model predicted to benefit most is the one that lost. |
+| [Real photos vs the commercial app](real-photos-evaluation.md) | *(brief §3.3, §5)*: the corner detector and the enhancement network scored on real phone photos instead of synthetic pages — a Roboflow export parsed into ground-truth corners, and CamScanner as the readability baseline. |
 | [Running on Colab](running-on-colab.md) | The session recipe for the machine that is not the development laptop: where the data goes, how a killed session resumes, and what throughput to expect. |
 
-Not yet built: the OCR comparison against a commercial scanning app, and the real-photo half of the
-corner evaluation. The dropout study and the end-to-end fine-tune have both run and are written up.
-The status table in the [top-level README](../README.md) is kept honest.
+Not yet built: the figures beyond what the individual pages already carry, and the written report.
+Everything else — including the real-photo study, once blocked on data only the author could
+produce — has run and is written up. The status table in the
+[top-level README](../README.md) is kept honest.
 
 ## The idea in one picture
 
@@ -71,6 +73,7 @@ scanner *(brief §1.3)*.
 | `src/scandar/evaluate.py` | The results table, with the do-nothing baseline beside it |
 | `src/scandar/pipelines.py` | Inference on unseen data — tiled, blended, full resolution, and the whole scanner in one call |
 | `src/scandar/warp.py` | Homographies and perspective warping in torch, so the bonus chain has a gradient |
+| `src/scandar/ocr.py` | Tesseract confidence and hand-written CER/WER, for the real-photo readability study |
 | `src/scandar/checks.py` | The sanity checks |
 
 Scripts are thin and call into the package:

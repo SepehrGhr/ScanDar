@@ -33,7 +33,7 @@ Built incrementally; this table is kept honest.
 | Enhancement network: architecture, loss, trainer, evaluation, inference pipeline | **done — trained, +8.8 dB PSNR over the baseline on test** |
 | Loss and architecture ablations | configs written, runs pending |
 | Corner detection: both networks, losses, metrics and the §5.1 inference pipeline | **done — heatmap detector trained, 1.06 px on test** |
-| Real-photo study: OCR readability against a commercial scanning app | not started |
+| Real-photo study: corner detection against Roboflow labels, OCR readability against CamScanner | **done** — [the study](docs/real-photos-evaluation.md) |
 | Dropout study: does it close the synthetic-to-real gap? | **done on the synthetic half — a null result, written up** — [the study](docs/dropout-study.md); the real-photo half waits on the reference scans |
 | The end-to-end scanner *(bonus)* | **done — chained, differentiable, fine-tuned and scored** — [how it works](docs/end-to-end-scanner.md) |
 | Demo app, figures, written report | not started |
@@ -86,9 +86,38 @@ trained — got the winner and the margin's direction right, under-rated *both* 
 was outright wrong about how each one would fail. It is scored line by line, as written, in
 [the corner-detection notes](docs/corner-detection.md).
 
-On the 19 real phone photos, **17 came straight from the network** — carpet, marble, wood, a red
-table, hard shadows and steep angles. The other two went to the classical guardrail, which is what it
-is there for.
+On the 16 real, Roboflow-labelled photos — carpet, marble, wood, a red table, hard shadows and steep
+angles — the network scores **10.89 px mean error (0.34% of the diagonal), PCK@2% 1.000**, going
+straight to the neural path on 15 of 16; the other fell to the classical guardrail. As a percentage of
+the diagonal, the only unit that lets a 256×256 synthetic photo and a ~3200 px real one be compared
+honestly, real photos cost almost nothing over synthetic (0.34% against 0.29%) — see
+[the real-photo study](docs/real-photos-evaluation.md) for the full table and what it means for the
+enhancement network too.
+
+### Real photos vs CamScanner
+
+Both networks trained purely on synthetic composites, scored on photographs neither has seen anything
+like — 16 hand-labelled real photos for the corner detector, five of those with a CamScanner reference
+scan for the enhancement network *(brief §3.3, §5)*:
+
+| | synthetic test | real photos |
+| :--- | ---: | ---: |
+| corner error, % of diagonal | 0.29% | 0.34% |
+| corner PCK@2% | 0.955 | 1.000 |
+
+| Photo | Tesseract confidence — input | ours | CamScanner |
+| :--- | ---: | ---: | ---: |
+| mean of 5 | 41.1 | **42.5** | 41.2 |
+
+**The synthetic-to-real gap this project worried about from the start is close to zero for the corner
+detector**, once both numbers are read as a percentage of the image diagonal rather than compared in
+raw pixels. On readability, our output is not distinguishable from the commercial app by Tesseract's
+own confidence score — it wins on three of the five photos and loses narrowly on two. The one place
+CamScanner clearly wins is character error rate on the single printed document with a transcript
+(0.173 against our 0.285): its aggressive whitening and sharpening happens to be exactly what an OCR
+engine's character segmentation wants on dense printed text, a case this project's training
+distribution — handwritten lecture notes, mostly — does not emphasise. Full tables, the failure case,
+and triplet figures with zoomed insets are in [the write-up](docs/real-photos-evaluation.md).
 
 ### Dropout — a null result, and one surprise
 
