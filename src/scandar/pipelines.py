@@ -21,9 +21,19 @@ Built so far:
     handed a whole photo it faithfully tries to turn the desk, the floor and the
     wall into white paper with ink on them.
 
-Not built yet: ``scan_document(photo)`` *(brief §7, the bonus)*, which composes
-the two — photo in, clean scan out, no human input. Corner ordering matters
-there: a permuted quad flips or rotates the page.
+``scan_document(photo, detector, enhancer)``  — brief §7, the bonus
+    The two chained: photo in, clean scan out, no human input. Detect the
+    corners, order and check them, flatten the page, restore it. Corner ordering
+    matters here more than anywhere else, because a permuted quad rotates or
+    mirrors the whole document and everything after it looks like a bad model
+    rather than a swapped pair of points.
+
+    This is the *inference* chain and it uses OpenCV, which has no gradient and
+    does not need one. The differentiable twin — the same steps in torch, so the
+    restoration loss can train the detector — is
+    :class:`~scandar.model.EndToEndScanner` over :mod:`scandar.warp`. The two
+    agree to a tenth of a grey level, and there is a test that keeps them
+    agreeing.
 
 **Why there is a classical fallback at all.** The grade is decided live, on
 photographs nobody has seen, and a neural detector that has never met a
@@ -81,6 +91,8 @@ __all__ = [
     "classical_corners",
     "predict_corners",
     "draw_corners",
+    "scan_document",
+    "scan_file",
 ]
 
 #: A4, the shape every scan in this project was made from. Used when a quad's own
@@ -89,7 +101,14 @@ __all__ = [
 A4_ASPECT = 1.0 / 1.4142
 
 
-def rectify_document(photo, corners, out_width: int = 1024, aspect=None) -> np.ndarray:
+def rectify_document(
+    photo,
+    corners,
+    out_width: int = 1024,
+    aspect=None,
+    backend: str = "cv2",
+    device=None,
+) -> np.ndarray:
     """Flatten the page bounded by *corners* out of *photo*.
 
     *corners* is any four ``(x, y)`` points in photo pixels; they are put into the
@@ -103,6 +122,23 @@ def rectify_document(photo, corners, out_width: int = 1024, aspect=None) -> np.n
     was shot steeply enough that its projected edges understate one dimension —
     foreshortening makes the far edge shorter, and an aspect read off it squashes
     the result.
+
+    ``backend`` picks which of the project's **two** implementations of this
+    operation does the work:
+
+    ``"cv2"``
+        ``cv2.warpPerspective``, which is what generated every training pair in
+        the project and what runs by default. Bicubic, on the CPU, exact.
+    ``"torch"``
+        the differentiable twin in :mod:`scandar.warp` — a homography solved with
+        ``torch.linalg.solve`` and sampled with ``F.grid_sample``. Identical
+        output to within a tenth of a grey level, on the GPU, and the same code
+        the end-to-end fine-tuning trains through.
+
+    Having both is the point rather than an accident: the bonus is only
+    *end-to-end* if the warp in the middle of the chain has a gradient, and the
+    only way to be sure that warp is the same operation the rest of the project
+    means by "rectify" is to be able to run either one from the same call.
     """
     import cv2
 
@@ -124,10 +160,38 @@ def rectify_document(photo, corners, out_width: int = 1024, aspect=None) -> np.n
 
     out_width = int(out_width)
     out_height = max(1, int(round(out_width / max(ratio, 1e-6))))
+
+    if backend == "torch":
+        return _rectify_torch(photo, quad, (out_width, out_height), device=device)
+    if backend != "cv2":
+        raise ValueError(f"unknown warp backend {backend!r}; expected 'cv2' or 'torch'")
+
     transform = homography(quad, rect_corners(out_width, out_height))
     return cv2.warpPerspective(
         photo, transform, (out_width, out_height), flags=cv2.INTER_CUBIC
     )
+
+
+@torch.no_grad()
+def _rectify_torch(photo: np.ndarray, quad: np.ndarray, size, device=None) -> np.ndarray:
+    """:func:`rectify_document`'s torch backend — the differentiable path, run for real.
+
+    Bicubic to match what ``cv2.warpPerspective`` is asked for on the other side,
+    and clamped afterwards because bicubic overshoots at a hard edge and an 8-bit
+    cast of a negative number wraps around into white.
+    """
+    from .device import get_device
+    from .geometry import normalize_corners
+    from .warp import rectify
+
+    device = device if device is not None else get_device()
+    height, width = photo.shape[:2]
+    tensor = torch.from_numpy(np.ascontiguousarray(photo.transpose(2, 0, 1)))
+    tensor = tensor.to(device).to(torch.float32).div_(255.0)[None]
+    corners = torch.from_numpy(normalize_corners(quad, (width, height)))[None].to(device)
+
+    flat = rectify(tensor, corners, size, normalised=True, mode="bicubic")
+    return to_uint8(clamp_image(flat)[0].permute(1, 2, 0).cpu().numpy())
 
 
 def _cosine_window(height: int, width: int, overlap: int) -> np.ndarray:
@@ -538,6 +602,167 @@ def draw_corners(
                 cv2.LINE_AA,
             )
     return canvas
+
+
+# ---------------------------------------------------------------------------
+# the whole scanner  (brief §7, the bonus)
+# ---------------------------------------------------------------------------
+def scan_document(
+    photo,
+    detector=None,
+    enhancer=None,
+    device=None,
+    input_size: int = 256,
+    out_width: int = 1024,
+    aspect="a4",
+    corners=None,
+    fallback: bool = True,
+    tile: int = 512,
+    overlap: int = 192,
+    amp: bool = False,
+    warp: str = "cv2",
+    **enhance_kwargs,
+) -> dict:
+    """A phone photo in, a clean scan out, with nobody clicking anything *(brief §7)*.
+
+    1. **Detect** the four corners with the trained detector, at the photo's own
+       resolution *(brief §5.1)*.
+    2. **Order and check** them. This is the step the composition lives or dies
+       on: the enhancement network has never seen a page that is upside down or
+       mirrored, so a permuted quad does not degrade the output gracefully, it
+       ruins it. If the quad is unusable the classical detector gets a turn, and
+       if that fails too the frame itself is used — the chain always produces
+       something, which for a live demonstration on unseen photographs is worth
+       more than occasionally producing something excellent.
+    3. **Rectify** at ``out_width`` on the A4 aspect the scans were made at.
+    4. **Enhance** the flattened page in cosine-blended overlapping tiles
+       *(brief §3.4)*.
+
+    Returns the ``detect_corners`` dict with three keys added: ``rectified``, the
+    flattened page before restoration; ``scan``, the finished result; and
+    ``source``, already there, saying which path found the corners. That last one
+    is returned rather than printed so a caller scoring a whole folder can count
+    how often the fallback ran, which is the number to know *before* presentation
+    day rather than during it.
+
+    ``corners`` skips the detector entirely and flattens the page with points
+    that were passed in — annotated corners, or four clicks. Passing them is what
+    makes the evaluation the brief asks for possible: run the same chain twice,
+    once on predicted corners and once on the true ones, and the difference is
+    exactly what the detector's error costs the scan.
+
+    ``aspect`` defaults to A4 rather than to the quad's own edge lengths, because
+    every document this project was built for is A4 and a steeply photographed
+    page understates one of its dimensions. Pass ``None`` for a page of unknown
+    shape.
+
+    ``warp`` chooses which implementation flattens the page — ``"cv2"``, the
+    OpenCV one every training pair was made with, or ``"torch"``, the
+    differentiable one the end-to-end fine-tuning trains through. They agree to a
+    tenth of a grey level; see :func:`rectify_document`.
+
+    *detector* may be an :class:`~scandar.model.EndToEndScanner`, in which case
+    the two halves are taken out of it and *enhancer* is not needed. That is how
+    a fine-tuned chain is run on a photograph: the model it was saved as goes
+    straight into the pipeline it was fine-tuned for.
+    """
+    from .model import EndToEndScanner
+
+    if isinstance(detector, EndToEndScanner):
+        detector, enhancer = detector.detector, (enhancer or detector.enhancer)
+
+    if isinstance(photo, (str, Path)):
+        photo = imread_rgb(photo)
+    if photo.ndim != 3 or photo.shape[2] != 3:
+        raise ValueError(f"expected an RGB HWC photo, got shape {photo.shape}")
+
+    if corners is not None:
+        from .geometry import normalize_corners, order_corners
+
+        quad = order_corners(np.asarray(corners, dtype=np.float32).reshape(4, 2))
+        result = {
+            "corners": quad,
+            "normalised": normalize_corners(quad, (photo.shape[1], photo.shape[0])),
+            "size": (photo.shape[1], photo.shape[0]),
+            "source": "given",
+            "problem": None,
+            "confidence": None,
+            "heatmaps": None,
+            "kind": None,
+        }
+    else:
+        if detector is None:
+            raise ValueError("scan_document needs a detector, or corners to use instead of one")
+        result = detect_corners(
+            photo, detector, device=device, input_size=input_size, fallback=fallback
+        )
+
+    rectified = rectify_document(
+        photo, result["corners"], out_width=out_width, aspect=aspect,
+        backend=warp, device=device,
+    )
+    result["rectified"] = rectified
+    result["warp"] = warp
+    result["scan"] = (
+        rectified
+        if enhancer is None
+        else enhance_document(
+            rectified, enhancer, device=device, tile=tile, overlap=overlap, amp=amp,
+            **enhance_kwargs,
+        )
+    )
+    return result
+
+
+def scan_file(
+    input_path,
+    output_path,
+    detector_checkpoint=None,
+    enhancer_checkpoint=None,
+    scanner_checkpoint=None,
+    device=None,
+    save_rectified=None,
+    **kwargs,
+) -> dict:
+    """``scan_document`` end to end over files, which is what the CLI runs.
+
+    Two ways to say which weights: the two networks separately, or one
+    ``scanner_checkpoint`` from a fine-tuned end-to-end run, which carries both.
+    The second is how the fine-tuned chain gets used on a real photograph, and it
+    needs nothing else — a scanner checkpoint holds the detector, the enhancer
+    and the config they were assembled with.
+    """
+    from .device import get_device
+    from .model import load_model
+
+    device = device if device is not None else get_device()
+    if scanner_checkpoint is not None:
+        scanner, detector_config = load_model(scanner_checkpoint, device=device)
+        detector, enhancer = scanner.detector, scanner.enhancer
+    else:
+        if not (detector_checkpoint and enhancer_checkpoint):
+            raise ValueError(
+                "give either a scanner checkpoint or both a detector and an enhancer"
+            )
+        detector, detector_config = load_model(detector_checkpoint, device=device)
+        enhancer, _ = load_model(enhancer_checkpoint, device=device)
+
+    photo = imread_rgb(input_path) if isinstance(input_path, (str, Path)) else input_path
+    result = scan_document(
+        photo,
+        detector,
+        enhancer,
+        device=device,
+        # From the detector's own config, never a default: a detector trained at
+        # one input size and run at another is wrong in a way that looks like a
+        # mediocre model.
+        input_size=int(detector_config.get("data", {}).get("corner_input", 256)),
+        **kwargs,
+    )
+    result["written"] = imwrite_rgb(output_path, result["scan"])
+    if save_rectified:
+        result["written_rectified"] = imwrite_rgb(save_rectified, result["rectified"])
+    return result
 
 
 def detect_corners_file(input_path, output_path, checkpoint, device=None, **kwargs) -> dict:

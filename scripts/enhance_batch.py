@@ -26,6 +26,12 @@ That is the whole scanner — photo in, clean scan out, no human input. It is wo
 keeping both paths: the clicked corners are the closest thing this project has to
 ground truth on a real photo, so running the same photos both ways is what prices
 exactly what a corner error costs the enhancement stage *(brief §7)*.
+
+This script is the **contact sheet** version of that, and it keeps its own corner
+cache so two models can be compared on identical rectifications. The one-call API
+is ``pipelines.scan_document``, behind ``scandar scan``, and
+``evaluate.py --config configs/scan_e2e.yaml`` is the same comparison done with
+numbers instead of by eye. See ``docs/end-to-end-scanner.md``.
 """
 
 import argparse

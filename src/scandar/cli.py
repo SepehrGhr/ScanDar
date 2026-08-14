@@ -1,9 +1,9 @@
 """Command line entry point: ``scandar <command>``.
 
-Data preparation, verification, training, evaluation and both inference pipelines
-— ``enhance`` for a rectified page, ``detect`` for a raw photo's corners — all
-work. The end-to-end scanner that chains them is the bonus part and does not
-exist yet; it says so plainly rather than failing with a traceback.
+Data preparation, verification, training, evaluation and all three inference
+pipelines — ``enhance`` for a rectified page, ``detect`` for a raw photo's
+corners, and ``scan``, which chains them: a photo in, a clean scan out, with
+nobody clicking anything.
 """
 
 from __future__ import annotations
@@ -61,6 +61,31 @@ def build_parser() -> argparse.ArgumentParser:
     scan = sub.add_parser("scan", help="photo in, clean scan out (bonus)")
     scan.add_argument("--input", required=True)
     scan.add_argument("--output", required=True)
+    scan.add_argument("--detector", default=None, help="a corner detector's best.pt")
+    scan.add_argument("--enhancer", default=None, help="an enhancement network's best.pt")
+    scan.add_argument(
+        "--scanner",
+        default=None,
+        help="a fine-tuned end-to-end run's best.pt, which carries both halves",
+    )
+    scan.add_argument(
+        "--warp",
+        choices=("cv2", "torch"),
+        default="cv2",
+        help="which implementation flattens the page (they agree; torch is the differentiable one)",
+    )
+    scan.add_argument("--rectified", default=None, help="also write the flattened page here")
+    scan.add_argument("--width", type=int, default=1024, help="rectified page width in px")
+    scan.add_argument(
+        "--keep-aspect",
+        action="store_true",
+        help="estimate the page shape from the quad instead of assuming A4",
+    )
+    scan.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="fail loudly on a degenerate quad instead of falling back to Canny",
+    )
 
     return parser
 
@@ -126,12 +151,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "scan":
-        raise SystemExit(
-            "The end-to-end scanner is not built yet — chaining the two networks is the "
-            "bonus part. Both halves work separately today: `scandar detect` finds the "
-            "corners of a raw photo, and `scandar enhance` restores a page that has "
-            "already been flattened."
+        from .pipelines import scan_file
+
+        if not args.scanner and not (args.detector and args.enhancer):
+            raise SystemExit(
+                "give --scanner <a fine-tuned end-to-end run's best.pt>, or both --detector "
+                "and --enhancer"
+            )
+        result = scan_file(
+            args.input,
+            args.output,
+            args.detector,
+            args.enhancer,
+            scanner_checkpoint=args.scanner,
+            save_rectified=args.rectified,
+            out_width=args.width,
+            aspect=None if args.keep_aspect else "a4",
+            fallback=not args.no_fallback,
+            warp=args.warp,
         )
+        print(f"corners via the {result['source']} path, page flattened with {result['warp']}")
+        if result["problem"]:
+            print(f"  the model's quad was rejected: {result['problem']}")
+        if result.get("written_rectified"):
+            print(f"wrote {result['written_rectified']}")
+        print(f"wrote {result['written']}")
+        return 0
 
     raise SystemExit(f"unknown command: {args.command}")
 
