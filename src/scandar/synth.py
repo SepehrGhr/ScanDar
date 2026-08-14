@@ -207,7 +207,8 @@ class Sample:
         rect_size,
         tries: int = 4,
         min_std: float = 0.045,
-    ) -> tuple[np.ndarray, np.ndarray, tuple[int, int, int]]:
+        with_input: bool = True,
+    ) -> tuple[np.ndarray | None, np.ndarray, tuple[int, int, int]]:
         """A random patch, preferring one with something written on it.
 
         A uniformly random crop of an A4 page is very often blank margin. Blank
@@ -215,6 +216,13 @@ class Sample:
         the job — but a training set made mostly of them spends its capacity on
         the easy half. Up to *tries* boxes are drawn and the first with enough
         contrast wins, which biases towards text without ever excluding blanks.
+
+        ``with_input=False`` returns ``None`` for the degraded half. The
+        end-to-end task warps its own input out of the whole photo, through the
+        *predicted* corners, so warping it a second time here with the true ones
+        would be work thrown away — and the box has to be chosen by the same
+        contrast-seeking draw either way, which is why this is a flag rather than
+        a second function that could drift from this one.
         """
         import cv2
 
@@ -235,11 +243,15 @@ class Sample:
             if candidate.std() / 255.0 >= min_std or attempt == tries - 1:
                 break
 
-        degraded = cv2.warpPerspective(
-            self.photo,
-            translation(-box[0], -box[1]) @ to_rect,
-            (patch, patch),
-            flags=cv2.INTER_LINEAR,
+        degraded = (
+            cv2.warpPerspective(
+                self.photo,
+                translation(-box[0], -box[1]) @ to_rect,
+                (patch, patch),
+                flags=cv2.INTER_LINEAR,
+            )
+            if with_input
+            else None
         )
         return degraded, target, box
 

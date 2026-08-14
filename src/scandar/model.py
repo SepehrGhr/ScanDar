@@ -26,6 +26,10 @@ Built so far:
     Corner detection, approach B. The same encoder-decoder family as the
     enhancement network, stopping one level short of full resolution to emit four
     Gaussian heatmaps at half the input size.
+``EndToEndScanner``
+    The bonus *(brief §7)*: a detector and an enhancement network chained into one
+    model, with the homography and the warp done in torch so the restoration loss
+    reaches back to the predicted corners.
 ``soft_argmax2d`` / ``heatmap_peaks``
     Reading coordinates back off those heatmaps: a differentiable sub-pixel
     expectation, and the plain arg-max it is compared against.
@@ -34,8 +38,9 @@ Built so far:
     trainer. Every checkpoint stores the config it was built from, so nothing has
     to be remembered to reload one.
 
-Every model declares an ``output_kind`` — ``"restoration"``, ``"coords"`` or
-``"heatmaps"``. The trainer, the losses and the metrics all dispatch on it, so
+Every model declares an ``output_kind`` — ``"restoration"``, ``"coords"``,
+``"heatmaps"`` or ``"scan"`` for the chained pair, which emits several of those
+at once. The trainer, the losses and the metrics all dispatch on it, so
 adding a model is one class and one registry entry rather than an edit in four
 files.
 """
@@ -51,6 +56,7 @@ __all__ = [
     "DocUNet",
     "CornerRegNet",
     "CornerHeatNet",
+    "EndToEndScanner",
     "soft_argmax2d",
     "heatmap_peaks",
     "corners_from_output",
@@ -669,12 +675,203 @@ def corners_from_output(
 
 
 # ---------------------------------------------------------------------------
+# the two networks, chained  (brief §7, the bonus)
+# ---------------------------------------------------------------------------
+class EndToEndScanner(nn.Module):
+    """Detector and enhancer as one differentiable model *(brief §7)*.
+
+    A raw photo goes in and a restored patch of the flattened page comes out,
+    with a gradient running the whole way back:
+
+        photo -> detector -> soft-argmax corners -> homography -> warp ->
+        enhancer -> restoration loss against the clean rectified target
+
+    Every arrow is a torch operation. The two the project normally does in numpy
+    — solving the homography and resampling through it — are written again in
+    :mod:`scandar.warp` for exactly this reason; ``cv2.warpPerspective`` would
+    make the chain a *composition* but not an end-to-end *model*, and the brief's
+    bonus is about the second thing.
+
+    **The decisions inside the forward pass, in the order they bite.**
+
+    *The windowed soft-argmax, not the global one.* The extraction is
+    differentiable either way — the window is a constant mask, so the gradient
+    simply reaches the 11x11 neighbourhood of the peak instead of the whole map.
+    The global expectation measures the linear head's background noise and lands
+    6.8 pixels out (see :func:`corners_from_output`), and a warp built on corners
+    that wrong misaligns the page, which would leave the loss measuring
+    misalignment rather than restoration.
+
+    *No reordering.* :func:`scandar.geometry.order_corners` is numpy and would
+    sever the graph. It is also unnecessary: the heatmap channels are TL, TR, BR,
+    BL by construction, and the regression head's outputs are too. Ordering is an
+    inference-time guardrail and lives in
+    :func:`scandar.pipelines.scan_document`.
+
+    *Straight to a patch.* A whole 1024x1448 page through the enhancement network
+    with a backward pass does not fit on a 6 GB card. The crop is composed into
+    the homography, so the step costs what the enhancement baseline's step cost,
+    and because the crop origin is a constant the gradient reaching the corners is
+    unaffected.
+
+    *The enhancer is frozen by default.* Under a joint loss an unfrozen enhancer
+    would simply learn to absorb the misalignment — blur a little, and a corner
+    error stops costing anything — leaving the detector with no signal, which is
+    the one outcome that would make the experiment meaningless. ``freeze_enhancer:
+    false`` is the ablation, and a much lower learning rate is the middle course.
+
+    The submodules are built from ordinary ``model:`` blocks, so any detector this
+    project has works here, and their weights are loaded from finished runs by
+    :meth:`load_components` rather than in the constructor — a checkpoint of the
+    whole scanner has to be reloadable on a machine where those runs do not exist.
+    """
+
+    output_kind = "scan"
+
+    def __init__(
+        self,
+        detector: dict | None = None,
+        enhancer: dict | None = None,
+        detector_weights: str | None = None,
+        enhancer_weights: str | None = None,
+        rect_size=(1024, 1448),
+        patch_size: int = 256,
+        freeze_enhancer: bool = True,
+        soft_argmax_window: int | None = SOFT_ARGMAX_WINDOW,
+    ) -> None:
+        super().__init__()
+        self.detector = build_model({"model": dict(detector or {"name": "cornerheatnet"})})
+        self.enhancer = build_model({"model": dict(enhancer or {"name": "docunet"})})
+        if str(getattr(self.detector, "output_kind", "")) not in ("coords", "heatmaps"):
+            raise ValueError(
+                f"{type(self.detector).__name__} is not a corner detector — "
+                "the first half of the chain has to predict corners"
+            )
+        if str(getattr(self.enhancer, "output_kind", "")) != "restoration":
+            raise ValueError(
+                f"{type(self.enhancer).__name__} does not restore images — "
+                "the second half of the chain has to be an enhancement network"
+            )
+
+        self.detector_weights = detector_weights
+        self.enhancer_weights = enhancer_weights
+        self.rect_size = (int(rect_size[0]), int(rect_size[1]))
+        self.patch_size = int(patch_size)
+        self.soft_argmax_window = soft_argmax_window
+        self.freeze_enhancer = bool(freeze_enhancer)
+        if self.freeze_enhancer:
+            for parameter in self.enhancer.parameters():
+                parameter.requires_grad_(False)
+
+    def train(self, mode: bool = True):  # noqa: D102 - see the note below
+        # A frozen submodule stays in eval mode whatever the parent does.
+        # Batch normalisation is the reason: its running statistics update in
+        # training mode even with every gradient switched off, so a "frozen"
+        # enhancer left in training mode would quietly drift its own
+        # normalisation towards the warped patches and stop being the model the
+        # comparison is against.
+        super().train(mode)
+        if self.freeze_enhancer:
+            self.enhancer.eval()
+        return self
+
+    def load_components(self, strict: bool = True) -> dict[str, str]:
+        """Initialise the two halves from finished runs.
+
+        Called by the trainer at the start of a fresh run, not by the
+        constructor: rebuilding this model from its own checkpoint must not
+        depend on two other checkpoints still being where they were.
+
+        Each name is either a run name — resolved through the output root, so it
+        follows ``SCANDAR_OUT`` onto Drive like everything else — or a path to a
+        checkpoint.
+        """
+        loaded = {}
+        for role, name in (("detector", self.detector_weights), ("enhancer", self.enhancer_weights)):
+            if not name:
+                continue
+            path = _checkpoint_path(name)
+            if not path.exists():
+                if strict:
+                    raise FileNotFoundError(
+                        f"no checkpoint for the {role} at {path} — "
+                        f"train {name} first, or drop model.{role}_weights to start from scratch"
+                    )
+                continue
+            state = torch.load(str(path), map_location="cpu", weights_only=False)
+            getattr(self, role).load_state_dict(state["model"])
+            loaded[role] = str(path)
+        return loaded
+
+    def corners(self, image: torch.Tensor) -> torch.Tensor:
+        """Normalised ``(B, 4, 2)`` corners, differentiably, from the detector."""
+        return corners_from_output(self.detector(image), window=self.soft_argmax_window)
+
+    def forward(self, batch: dict) -> dict:
+        """``{image, source, box[, size]}`` in, ``{corners, rectified, restored}`` out.
+
+        A dict rather than a tensor because the chain genuinely needs three
+        inputs: the small image the detector reads, the large photo the warp
+        resamples out of, and where on the page this sample's crop belongs. The
+        trainer dispatches on ``output_kind``, so nothing else had to learn about
+        it.
+
+        ``size`` is optional and matters for one reason: a batch that mixed a
+        portrait photograph with a landscape one was padded to a common shape by
+        :func:`scandar.datasets.collate_photos`, and the corners belong to the
+        photo's *true* size rather than to the padded tensor's.
+        """
+        from .warp import rectify_patch
+
+        if not isinstance(batch, dict):
+            raise TypeError(
+                "the end-to-end scanner takes a dict of tensors "
+                "({'image', 'source', 'box'}), not a bare tensor"
+            )
+        image = batch["image"]
+        source = batch["source"]
+        if source.dtype == torch.uint8:
+            # The loader carries the large photo in 8 bits; this is where it
+            # becomes an image, on the device, where the copy is cheap.
+            source = source.float().div_(255.0)
+
+        corners = self.corners(image)
+        box = batch["box"][..., :2] if batch["box"].dim() == 2 else batch["box"][:2]
+        rectified = rectify_patch(
+            source,
+            corners,
+            self.rect_size,
+            box,
+            self.patch_size,
+            normalised=True,
+            # Each photo's own size, which is not the tensor's shape when the
+            # batch mixed portrait and landscape and was padded to fit.
+            size=batch.get("size"),
+        )
+        restored = self.enhancer(rectified)
+        return {"corners": corners, "rectified": rectified, "restored": restored}
+
+
+def _checkpoint_path(name: str):
+    """A run name or a path, resolved to a checkpoint file."""
+    from pathlib import Path
+
+    from .io import paths
+
+    candidate = Path(name)
+    if candidate.suffix == ".pt":
+        return candidate
+    return paths.run_dir(name) / "best.pt"
+
+
+# ---------------------------------------------------------------------------
 # building and loading
 # ---------------------------------------------------------------------------
 MODELS = {
     "docunet": DocUNet,
     "cornerregnet": CornerRegNet,
     "cornerheatnet": CornerHeatNet,
+    "scanner": EndToEndScanner,
 }
 
 

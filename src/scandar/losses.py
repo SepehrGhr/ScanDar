@@ -67,6 +67,7 @@ __all__ = [
     "heatmap_mse",
     "wing_loss",
     "CornerLoss",
+    "ScanLoss",
     "build_loss",
 ]
 
@@ -487,11 +488,112 @@ class CornerLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# the end-to-end chain  (brief §7)
+# ---------------------------------------------------------------------------
+class ScanLoss(nn.Module):
+    """The loss for the chained scanner: restoration, optionally anchored *(brief §7)*.
+
+    The whole point of the bonus is that **the restoration loss trains the
+    detector**. So the primary term is the ordinary enhancement loss, applied to
+    the restored patch against the same clean target the enhancement network was
+    always trained on, and the gradient finds the corners by itself through the
+    warp. This class adds nothing to that; it composes the two losses that
+    already exist so the terms, their weights and their reporting behave
+    identically to every other run in the project.
+
+    The corner terms are an **anchor, off by default**. The brief asks for
+    fine-tuning with the enhancement loss, and a corner term large enough to
+    matter would mean the detector was being trained by its old supervision with
+    the chain along for the ride — which is a different experiment, and one whose
+    result would be easy to mistake for the interesting one. If a run needs an
+    anchor to stay stable, it is worth reporting as its own arm rather than
+    folding into the headline.
+
+    Both halves report their terms unweighted, as everywhere else, so a training
+    log shows which one is moving. The names do not collide: the restoration
+    terms are ``l1``/``msssim``/``sobel`` and the corner terms are
+    ``coord_*``/``heatmap``.
+    """
+
+    def __init__(
+        self,
+        l1: float = 1.0,
+        mse: float = 0.0,
+        msssim: float = 0.5,
+        ssim: float = 0.0,
+        sobel: float = 0.25,
+        coord_l1: float = 0.0,
+        coord_l2: float = 0.0,
+        coord_wing: float = 0.0,
+        data_range: float = 1.0,
+        window_size: int = 11,
+        sigma: float = 1.5,
+        wing_width: float = 10.0,
+        wing_curvature: float = 2.0,
+        coord_scale: float = 256.0,
+    ) -> None:
+        super().__init__()
+        self.restoration = CombinedRestorationLoss(
+            l1=l1,
+            mse=mse,
+            msssim=msssim,
+            ssim=ssim,
+            sobel=sobel,
+            data_range=data_range,
+            window_size=window_size,
+            sigma=sigma,
+        )
+        anchored = any(weight > 0 for weight in (coord_l1, coord_l2, coord_wing))
+        # Coordinates only, and deliberately: the anchor is applied to the corners
+        # the warp actually used, and a heatmap term would be scoring a map the
+        # chain never read.
+        self.corner = (
+            CornerLoss(
+                coord_l1=coord_l1,
+                coord_l2=coord_l2,
+                coord_wing=coord_wing,
+                wing_width=wing_width,
+                wing_curvature=wing_curvature,
+                coord_scale=coord_scale,
+            )
+            if anchored
+            else None
+        )
+
+    @property
+    def active(self) -> list[str]:
+        return self.restoration.active + (self.corner.active if self.corner else [])
+
+    def extra_repr(self) -> str:
+        parts = [self.restoration.extra_repr()]
+        if self.corner is not None:
+            parts.append(f"anchor({self.corner.extra_repr()})")
+        return " + ".join(parts)
+
+    def forward(self, pred: dict, target: dict):
+        if not isinstance(pred, dict) or "restored" not in pred:
+            raise TypeError(
+                "the end-to-end loss takes the scanner's output dict "
+                "({'restored', 'corners', ...})"
+            )
+        total, parts = self.restoration(pred["restored"], target["target"])
+        if self.corner is not None:
+            # The anchor is applied to the *coordinates the chain used*, not to
+            # the detector's raw output: a heatmap term here would be scoring a
+            # map the warp never read.
+            corner_total, corner_parts = self.corner(pred["corners"], target["corners"])
+            total = total + corner_total
+            parts.update(corner_parts)
+        return total, parts
+
+
+# ---------------------------------------------------------------------------
 # building
 # ---------------------------------------------------------------------------
 LOSSES = {
     "restoration": CombinedRestorationLoss,
     "corner": CornerLoss,
+    "scan": ScanLoss,
 }
 
 

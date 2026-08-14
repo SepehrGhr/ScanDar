@@ -7,6 +7,12 @@
 ``SyntheticCornerDataset``
     The raw synthetic photo plus its corner labels, both as normalised coordinates
     and as four Gaussian heatmaps, so approaches A and B train off one dataset.
+``SyntheticScanDataset``
+    One sample carrying *both* labels — the whole photo, its true corners, and the
+    clean rectified crop the chain has to produce — for the end-to-end scanner
+    *(brief §7)*. Neither of the other two fits: the enhancement dataset has
+    already done the warp, with the true corners, and the corner dataset has no
+    restoration target.
 ``FrozenSyntheticDataset``
     Reads the train, validation and test samples that were generated once with a
     fixed seed. Freezing them is what makes the validation curve measure the model
@@ -52,6 +58,12 @@ from .io import imread_rgb, read_json
 from .prepare import ScanBank
 from .seed import rng_for
 from .synth import Sample, Sources, build_sources  # noqa: F401  (re-exported for callers)
+
+#: Which frozen bucket a task is scored on. Only the end-to-end scanner borrows
+#: another task's: it needs whole photos *and* an achievable restoration target,
+#: which is what the enhancement bucket already holds.
+FROZEN_BUCKET = {"scan": "enhance"}
+
 
 # ---------------------------------------------------------------------------
 # tensor plumbing
@@ -283,6 +295,210 @@ def corner_item(
     return item
 
 
+def _pad_replicate(image: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Extend ``(C, H, W)`` to ``(C, height, width)`` by repeating its last row and column.
+
+    Replicated rather than zero-filled because the padding is *sampled*: a
+    predicted quad may reach a little past the edge of the photo — the inference
+    guardrail tolerates that deliberately, since a page can be photographed with
+    a corner just off frame — and a band of black there would be read by the
+    enhancement network as ink.
+    """
+    channels, current_height, current_width = image.shape
+    if (current_height, current_width) == (height, width):
+        return image
+    padded = image.new_empty((channels, height, width))
+    padded[:, :current_height, :current_width] = image
+    if height > current_height:
+        padded[:, current_height:, :current_width] = image[:, -1:, :]
+    if width > current_width:
+        padded[:, :, current_width:] = padded[:, :, current_width - 1 : current_width]
+    return padded
+
+
+def collate_photos(batch):
+    """Default collation, plus the one tensor in this project that varies in size.
+
+    The generator holds the phone sideways in a tenth of its samples, so a batch
+    of end-to-end samples can mix a 1920x2560 photo with a 2560x1920 one and
+    ``torch.stack`` refuses it. Everything else in the project resizes to a fixed
+    square or crops a fixed patch before it reaches a batch; the raw photo the
+    differentiable warp resamples out of cannot, because shrinking it is what
+    ruins the page's resolution.
+
+    So the batch is padded up to its own largest photo, and each sample carries
+    its true ``size``. That size — not the padded tensor's shape — is what the
+    corners are denormalised against, so the padding is invisible to the warp
+    rather than being a systematic scale error in a tenth of every batch.
+    """
+    from torch.utils.data._utils.collate import default_collate
+
+    if "source" not in batch[0]:
+        return default_collate(batch)
+    shapes = {tuple(item["source"].shape) for item in batch}
+    if len(shapes) == 1:
+        return default_collate(batch)
+
+    height = max(item["source"].shape[-2] for item in batch)
+    width = max(item["source"].shape[-1] for item in batch)
+    return default_collate(
+        [{**item, "source": _pad_replicate(item["source"], height, width)} for item in batch]
+    )
+
+
+class SyntheticScanDataset(_SyntheticDataset):
+    """One sample for the whole chain: photo, true corners, clean page *(brief §7)*.
+
+    The end-to-end scanner is trained on a sample that neither existing dataset
+    provides. ``SyntheticEnhanceDataset`` hands over a page that has *already*
+    been flattened — with the true corners, which is precisely the step the
+    detector is supposed to be doing — and ``SyntheticCornerDataset`` has no
+    restoration target to score the far end of the chain against. Both come out
+    of the same :class:`~scandar.synth.Sample`, so this is a third view of the
+    generator rather than any new generator work.
+
+    What comes out, and why each piece is there:
+
+    ``image``   the photo at the detector's own input size, as it always sees it.
+    ``source``  the photo again, large, as **uint8** — this is what the
+                differentiable warp resamples the page out of.
+    ``corners`` the true corners, normalised, so the detector can still be
+                anchored or scored against them.
+    ``target``  the clean scan, cropped to one ``patch_size`` window of the page
+                rectified at ``rect_size``. Fixed, and computed from the *true*
+                corners: it is the anchor of the whole chain. Any wrong warp
+                raises the loss, so there is no degenerate zoom the optimiser can
+                escape into.
+    ``box``     where that window sits on the rectified page, so the chain can
+                warp straight into it.
+
+    **Why ``source`` is kept near full resolution.** The page occupies roughly
+    0.42 to 0.90 of the canvas height, so on the 1920x2560 canvas it is 1075 to
+    2300 pixels tall and the target is rectified at 1448. Shrink the photo to
+    save memory and the page is *upsampled* into the target — which is the exact
+    pathology ``enhance_realistic`` was built to remove, reintroduced one stage
+    later. It is kept in 8 bits instead, which costs a quarter of what a float
+    copy would through the loader, with the conversion done on the GPU where the
+    memory is cheaper than the bus.
+
+    **Why the input half of the pair is never generated.** The patch is warped by
+    the model, out of the photo, through the corners the *detector* predicted.
+    Warping it here with the true ones would be work thrown away — and worse, it
+    would be the answer.
+    """
+
+    task = "scan"
+
+    def __init__(
+        self,
+        sources: Sources,
+        split: str = "train",
+        length: int = 2400,
+        *,
+        input_size: int = 256,
+        heatmap_size: int = 128,
+        heatmap_sigma: float = 3.0,
+        source_side: int = 2560,
+        rect_size=(1024, 1448),
+        patch_size: int = 256,
+        patch_tries: int = 4,
+        min_patch_std: float = 0.045,
+        seed: int = 1234,
+        epoch: int = 0,
+    ) -> None:
+        super().__init__(sources, split, length, seed=seed, epoch=epoch)
+        self.input_size = int(input_size)
+        self.heatmap_size = int(heatmap_size)
+        self.heatmap_sigma = float(heatmap_sigma)
+        self.source_side = int(source_side)
+        self.rect_size = (int(rect_size[0]), int(rect_size[1]))
+        self.patch_size = int(patch_size)
+        self.patch_tries = int(patch_tries)
+        self.min_patch_std = float(min_patch_std)
+
+    def __getitem__(self, index: int) -> dict:
+        rng = self.rng_for_index(index)
+        sample = self.sources.compose(rng)
+        return scan_item(
+            sample,
+            rng,
+            input_size=self.input_size,
+            heatmap_size=self.heatmap_size,
+            heatmap_sigma=self.heatmap_sigma,
+            source_side=self.source_side,
+            rect_size=self.rect_size,
+            patch_size=self.patch_size,
+            patch_tries=self.patch_tries,
+            min_patch_std=self.min_patch_std,
+            extra={"scan": sample.params["scan"], "index": index},
+        )
+
+
+def scan_item(
+    sample: Sample,
+    rng,
+    *,
+    input_size: int,
+    heatmap_size: int,
+    heatmap_sigma: float,
+    source_side: int,
+    rect_size,
+    patch_size: int,
+    patch_tries: int = 4,
+    min_patch_std: float = 0.045,
+    extra: dict | None = None,
+) -> dict:
+    """Turn one :class:`~scandar.synth.Sample` into an end-to-end batch entry.
+
+    Shared by the on-the-fly dataset and the frozen buckets, so the training
+    distribution and the evaluation set are preprocessed by the same code.
+
+    The corner labels are normalised, which is what lets one set of four numbers
+    describe the page in *both* the 256x256 detector input and the large source
+    image without either being rescaled separately — the failure the brief warns
+    about twice.
+    """
+    import cv2
+
+    photo = sample.photo
+    height, width = photo.shape[:2]
+    resized, moved = resize_with_corners(photo, sample.corners, (input_size, input_size))
+    normalised = normalize_corners(moved, (input_size, input_size))
+
+    # Never upscale: a photo smaller than the requested side is already all the
+    # detail there is, and stretching it would only cost memory.
+    scale = min(1.0, float(source_side) / max(height, width))
+    if scale < 1.0:
+        source = cv2.resize(
+            photo,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        source = photo
+
+    _, target, box = sample.random_patch(
+        rng, patch_size, rect_size, tries=patch_tries, min_std=min_patch_std, with_input=False
+    )
+
+    item = {
+        "image": to_tensor(resized),
+        # 8 bits, converted on the device: a 1920x2560 float32 copy is 59 MB per
+        # sample through the loader and 15 MB as uint8.
+        "source": torch.from_numpy(np.ascontiguousarray(source.transpose(2, 0, 1))),
+        "corners": torch.from_numpy(normalised.astype(np.float32)),
+        "heatmaps": torch.from_numpy(
+            gaussian_heatmaps(normalised, (heatmap_size, heatmap_size), heatmap_sigma)
+        ),
+        "target": to_tensor(target),
+        "box": torch.tensor(box, dtype=torch.int32),
+        "corners_px": torch.from_numpy(np.asarray(sample.corners, dtype=np.float32)),
+        "size": torch.tensor([width, height], dtype=torch.int32),
+    }
+    item.update(extra or {})
+    return item
+
+
 # ---------------------------------------------------------------------------
 # the frozen evaluation sets
 # ---------------------------------------------------------------------------
@@ -302,6 +518,15 @@ class FrozenSyntheticDataset(Dataset):
     network on those would ask it to invert a colour cast and unbend a page it was
     never trained to, and would put a hard ceiling on its measured PSNR that has
     nothing to do with how well it restores a document.
+
+    The end-to-end task has **no bucket of its own**, and does not need one. It
+    is scored on the ``enhance`` bucket: those are whole composited photos with
+    their corner labels and their source scan, generated with the corner-only
+    extras stripped so the restoration target is achievable, on the 1920x2560
+    canvas the enhancement network was trained through. That is an end-to-end set
+    already. The caveat is worth stating rather than hiding: those photos carry no
+    distractor sheet, so a detector scores better on them than on its own bucket,
+    and the chain's corner numbers are not comparable with the detector table's.
 
     ``mode`` applies to the enhancement task. ``"page"`` returns the whole
     rectified page, which is what the report's table is computed on. ``"patch"``
@@ -328,6 +553,7 @@ class FrozenSyntheticDataset(Dataset):
         patches_per_page: int = 2,
         patch_tries: int = 4,
         min_patch_std: float = 0.045,
+        source_side: int = 2560,
     ) -> None:
         self.directory = Path(directory)
         manifest_path = self.directory / "manifest.json"
@@ -336,10 +562,11 @@ class FrozenSyntheticDataset(Dataset):
                 f"{manifest_path} not found — run `python scripts/freeze_eval_sets.py` first"
             )
         manifest = read_json(manifest_path)
-        if manifest.get("task", "corner") != task:
+        wanted = FROZEN_BUCKET.get(task, task)
+        if manifest.get("task", "corner") != wanted:
             raise ValueError(
                 f"{manifest_path} holds {manifest.get('task', 'corner')!r} samples, "
-                f"not {task!r} — the two tasks have separate frozen sets"
+                f"not {wanted!r} — the tasks have separate frozen sets"
             )
         if mode not in ("page", "patch"):
             raise ValueError(f"mode must be 'page' or 'patch', not {mode!r}")
@@ -357,6 +584,7 @@ class FrozenSyntheticDataset(Dataset):
         self.patches_per_page = max(1, int(patches_per_page)) if mode == "patch" else 1
         self.patch_tries = int(patch_tries)
         self.min_patch_std = float(min_patch_std)
+        self.source_side = int(source_side)
         self._cached: tuple[int, Sample] | None = None
 
     def __len__(self) -> int:
@@ -391,6 +619,21 @@ class FrozenSyntheticDataset(Dataset):
         entry_index, patch_index = divmod(index, self.patches_per_page)
         sample = self.sample_at(entry_index)
         entry = self.entries[entry_index]
+
+        if self.task == "scan":
+            return scan_item(
+                sample,
+                rng_for("frozen-scan", entry["id"], patch_index),
+                input_size=self.input_size,
+                heatmap_size=self.heatmap_size,
+                heatmap_sigma=self.heatmap_sigma,
+                source_side=self.source_side,
+                rect_size=self.rect_size,
+                patch_size=self.patch_size,
+                patch_tries=self.patch_tries,
+                min_patch_std=self.min_patch_std,
+                extra={"scan": entry["scan"], "id": entry["id"], "index": index},
+            )
 
         if self.task == "enhance":
             if self.mode == "patch":
@@ -440,7 +683,7 @@ def frozen_dataset(
 
     data = config.get("data", {})
     return FrozenSyntheticDataset(
-        paths.frozen_set(task, split),
+        paths.frozen_set(FROZEN_BUCKET.get(task, task), split),
         task=task,
         scans=scans,
         rect_size=tuple(data.get("rect_size", (1024, 1448))),
@@ -452,4 +695,5 @@ def frozen_dataset(
         patches_per_page=int(data.get("frozen_patches_per_page", 2)),
         patch_tries=int(data.get("patch_tries", 4)),
         min_patch_std=float(data.get("min_patch_std", 0.045)),
+        source_side=int(data.get("scan_source_side", 2560)),
     )

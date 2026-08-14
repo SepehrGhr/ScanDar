@@ -61,7 +61,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from .config import Config, load_config
-from .datasets import SyntheticCornerDataset, SyntheticEnhanceDataset, frozen_dataset
+from .datasets import (
+    SyntheticCornerDataset,
+    SyntheticEnhanceDataset,
+    SyntheticScanDataset,
+    collate_photos,
+    frozen_dataset,
+)
 from .device import amp_enabled, describe_device, get_device, recommended_workers
 from .io import paths, write_json
 from .losses import build_loss
@@ -172,9 +178,9 @@ def build_train_dataset(config: Config, task: str):
     one crop of one. There is no amortisation to be had — the photo *is* the
     sample — so corner training runs at the generator's raw rate.
     """
-    if task not in ("enhance", "corner"):
+    if task not in ("enhance", "corner", "scan"):
         raise NotImplementedError(
-            f"task {task!r} is not implemented — expected 'enhance' or 'corner'"
+            f"task {task!r} is not implemented — expected 'enhance', 'corner' or 'scan'"
         )
 
     data = config.data
@@ -190,6 +196,28 @@ def build_train_dataset(config: Config, task: str):
     limit = data.get("train_scan_limit")
     if limit:
         sources.scans = ScanBank(sources.scans.ids[: int(limit)], directory=sources.scans.directory)
+
+    if task == "scan":
+        # The chain is trained on the *enhancement* world — no tinted stock, no
+        # curl, no distractor sheet — because its target is the flat clean scan
+        # and those extras make it unachievable. That is `build_sources`'
+        # doing, via the task it was given above; it is worth saying out loud
+        # because it means the detector is fine-tuned on an easier distribution
+        # than the one it was trained on, and the report has to say so.
+        return SyntheticScanDataset(
+            sources,
+            "train",
+            length=samples,
+            input_size=int(data.get("corner_input", 256)),
+            heatmap_size=int(data.get("heatmap_size", 128)),
+            heatmap_sigma=float(data.get("heatmap_sigma", 3.0)),
+            source_side=int(data.get("scan_source_side", 2560)),
+            rect_size=tuple(data.rect_size),
+            patch_size=int(data.patch_size),
+            patch_tries=int(data.get("patch_tries", 4)),
+            min_patch_std=float(data.get("min_patch_std", 0.045)),
+            seed=int(config.project.seed),
+        )
 
     if task == "corner":
         return SyntheticCornerDataset(
@@ -255,6 +283,11 @@ def check_heatmap_size(config: Config, model, kind: str) -> None:
     all if the numbers happen to broadcast. Checked before anything is generated,
     where the message can name all three numbers.
     """
+    if kind == "scan" and hasattr(model, "detector"):
+        # The chain hides a detector inside it, and it can be mis-sized in
+        # exactly the same way.
+        inner = model.detector
+        return check_heatmap_size(config, inner, str(getattr(inner, "output_kind", "coords")))
     if kind != "heatmaps":
         return
     stride = int(getattr(model, "out_stride", 1))
@@ -300,6 +333,9 @@ def make_loader(dataset, config: Config, workers: int, shuffle: bool, drop_last:
         drop_last=drop_last,
         worker_init_fn=worker_init_fn if workers > 0 else None,
         persistent_workers=False,
+        # Identical to the default for every task but the end-to-end one, where a
+        # batch can hold photographs of two different orientations.
+        collate_fn=collate_photos,
     )
 
 
@@ -318,8 +354,30 @@ METRIC_FORMAT = {
 }
 
 
-def batch_inputs(batch: dict, kind: str, device) -> torch.Tensor:
+def batch_inputs(batch: dict, kind: str, device):
+    """What the model is fed, moved to the training device.
+
+    Every model in the project takes one tensor except the chained scanner, which
+    genuinely needs three: the small image its detector reads, the large photo
+    its warp resamples out of, and where on the rectified page this sample's crop
+    belongs. It receives them as a dict, which is why this returns one.
+    """
+    if kind == "scan":
+        return {
+            "image": batch["image"].to(device, non_blocking=True),
+            "source": batch["source"].to(device, non_blocking=True),
+            "box": batch["box"].to(device, non_blocking=True),
+            # Each photo's true size. It is not the source tensor's shape when a
+            # batch mixed portrait and landscape photographs and was padded to a
+            # common one, and the corners are normalised against the true size.
+            "size": batch["size"].to(device, non_blocking=True),
+        }
     return batch["input" if kind == "restoration" else "image"].to(device, non_blocking=True)
+
+
+def batch_size_of(inputs) -> int:
+    """How many samples a batch of inputs holds, tensor or dict."""
+    return int((inputs["image"] if isinstance(inputs, dict) else inputs).shape[0])
 
 
 def batch_targets(batch: dict, kind: str, device):
@@ -332,6 +390,10 @@ def batch_targets(batch: dict, kind: str, device):
     if kind == "restoration":
         return batch["target"].to(device, non_blocking=True)
     corners = batch["corners"].to(device, non_blocking=True)
+    if kind == "scan":
+        # The clean patch is what the chain is trained against; the corners come
+        # along for the anchor term and for the epoch's corner-error column.
+        return {"target": batch["target"].to(device, non_blocking=True), "corners": corners}
     if kind == "coords":
         return corners
     return {"corners": corners, "heatmaps": batch["heatmaps"].to(device, non_blocking=True)}
@@ -350,6 +412,22 @@ def quality_metrics(kind: str, outputs, targets, input_size: int = 256) -> dict:
             "psnr": psnr(predictions, targets, reduction="none"),
             "ssim": ssim_metric(predictions, targets, reduction="none"),
         }
+
+    if kind == "scan":
+        # Both halves, on one line, because the question the bonus asks is what
+        # the corner error costs the restoration — and watching one without the
+        # other during a fine-tune says nothing about that.
+        predictions = clamp_image(outputs["restored"].float())
+        metrics = {
+            "psnr": psnr(predictions, targets["target"], reduction="none"),
+            "ssim": ssim_metric(predictions, targets["target"], reduction="none"),
+        }
+        metrics.update(
+            corner_metrics(
+                outputs["corners"].detach().float(), targets["corners"].float(), size=input_size
+            )
+        )
+        return metrics
 
     # Read through the one function the evaluation table and the inference
     # pipeline also use, so the validation curve tracks the number that gets
@@ -378,9 +456,10 @@ def evaluate_epoch(
                 outputs = model(inputs)
             loss, parts = criterion(outputs, targets)
 
-            accumulator.add("loss", [float(loss)] * inputs.shape[0])
+            count = batch_size_of(inputs)
+            accumulator.add("loss", [float(loss)] * count)
             for name, value in parts.items():
-                accumulator.add(name, [value] * inputs.shape[0])
+                accumulator.add(name, [value] * count)
             accumulator.update(quality_metrics(kind, outputs, targets, input_size))
     return accumulator
 
@@ -401,10 +480,23 @@ def train(config: Config, resume: str | None = None) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # --- model, loss, optimiser -------------------------------------------
-    model = build_model(config).to(device)
+    model = build_model(config)
+    # A composed model starts from its parts' finished runs. Loading here, before
+    # the resume, costs one read of two checkpoints and keeps the order obvious:
+    # a resumed run overwrites all of it a few lines further down with its own
+    # state, which is exactly what it should do.
+    if hasattr(model, "load_components"):
+        for role, path in model.load_components().items():
+            print(f"init      : {role} from {path}")
+    model = model.to(device)
     criterion = build_loss(config)
+    # Only what is actually being trained. A frozen enhancer handed to Adam would
+    # still have moment buffers allocated for every one of its parameters, and a
+    # `requires_grad=False` parameter in a param group is an error waiting for
+    # the first step that touches it.
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        trainable,
         lr=float(train_cfg.lr),
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
@@ -449,6 +541,9 @@ def train(config: Config, resume: str | None = None) -> Path:
     # Patch-level validation for restoration, so the two curves on the brief's
     # graph are the same quantity; whole photos for corner detection, where a
     # sample is a photo and there is nothing to crop.
+    # One crop per frozen photo for the chain, not several: a scan sample warps
+    # out of a 1920x2560 photo, so a second crop of the same page costs a second
+    # decode and a second full-resolution transfer to buy very little variance.
     val_dataset = frozen_dataset(
         config, "val", task=task, mode="patch" if task == "enhance" else "page"
     )
@@ -459,6 +554,7 @@ def train(config: Config, resume: str | None = None) -> Path:
         f"data      : {len(scans)} train scans, {len(train_dataset)} samples/epoch, "
         f"{len(val_dataset)} frozen val "
         f"{'patches' if task == 'enhance' else 'photos'}, {workers} worker(s)"
+        + (f", trainable {sum(p.numel() for p in trainable):,}" if task == "scan" else "")
     )
 
     # --- resume ------------------------------------------------------------
@@ -530,7 +626,7 @@ def train(config: Config, resume: str | None = None) -> Path:
         for batch in train_loader:
             inputs = batch_inputs(batch, kind, device)
             targets = batch_targets(batch, kind, device)
-            seen += inputs.shape[0]
+            seen += batch_size_of(inputs)
 
             if micro == 0:
                 learning_rate = lr_at(global_step, total_steps, warmup_steps, base_lr, min_lr)

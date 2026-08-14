@@ -1,0 +1,127 @@
+# The bonus: the two networks chained, and fine-tuned end to end  (brief §7)
+#
+#   python evaluate.py --config configs/scan_e2e.yaml --limit 25   # before
+#   python train.py    --config configs/scan_e2e.yaml
+#   python evaluate.py --config configs/scan_e2e.yaml --limit 25   # after
+#
+# The first command works before this has ever been trained: it scores the chain
+# as *assembled* from the two finished runs, which is the baseline the fine-tune
+# has to beat and half of the comparison the report needs.
+#
+# --- what is being trained, and what is not ------------------------------
+#
+# The detector, and only the detector. Its gradient arrives from the enhancement
+# loss, through a warp written in torch, which is the whole point of the exercise:
+# a composition built on `cv2.warpPerspective` chains the two networks but cannot
+# train either of them from the other's loss.
+#
+# The enhancer is frozen. Under a joint loss it would otherwise learn to absorb
+# the misalignment — blurring slightly makes a corner error stop costing anything
+# — and the detector would receive no signal at all, which is the one outcome
+# that would make this experiment meaningless rather than merely negative.
+#
+# --- this is a fine-tune, not a training run -----------------------------
+#
+# `corner_heat` starts at 1.06 px mean error, already well inside the basin, and
+# the gradient reaching the corners is photometric: it flows through the warp's
+# spatial derivative, which is the image gradient at the sample points, in the
+# manner of Lucas-Kanade. **The most likely outcome is no measurable
+# improvement**, and that is a legitimate answer to the question the brief asks.
+# The learning rate is two orders of magnitude below the detector's own training
+# run for that reason — a chain this well initialised has far more to lose than
+# to gain, and an aggressive schedule would only demonstrate that.
+#
+# It also runs under a **new name**. `corner_heat` and `corner_reg` are a matched
+# pair answering §5, and fine-tuning either one would quietly invalidate that
+# comparison.
+#
+# --- the cost --------------------------------------------------------------
+#
+# One sample is one composited photo with no patch amortisation, as in the corner
+# runs (~6 samples/s measured on the 3060), and the warp and the enhancement step
+# are GPU-side work landing in time the CPU-bound loader is already wasting. The
+# batch is small because each sample carries a 1920x2560 photo that the warp
+# resamples the page out of; `grad_accum` puts the effective batch back at 16.
+
+_base_: base.yaml
+
+task: scan
+
+run:
+  name: corner_heat_e2e
+  notes: >
+    The heatmap detector fine-tuned through a differentiable warp by the
+    enhancement loss, with the enhancement network frozen.
+
+data:
+  # The enhancement world, at the enhancement canvas: the target is the flat
+  # clean scan, so the corner-only extras (tint, curl, distractor) are stripped
+  # structurally by SynthOptions and the canvas has to match the frozen enhance
+  # buckets this is validated on. Worth saying in the report: the detector is
+  # therefore fine-tuned on an easier distribution than it was trained on.
+  canvas: [1920, 2560]
+
+  # How large the photo is kept for the warp to resample the page out of. Shrink
+  # it and the page is *upsampled* into the target, which is the exact pathology
+  # `enhance_realistic` was written to remove. 2560 is the canvas's long side, so
+  # nothing is resized at all.
+  scan_source_side: 2560
+
+model:
+  name: scanner
+  # The two halves, spelled out rather than inherited: they come from different
+  # config files with nothing in common, and a test asserts these blocks still
+  # match `corner_heat.yaml` and `enhance.yaml` exactly.
+  detector:
+    name: cornerheatnet
+    base: 32
+    depth: 4
+    out_stride: 2
+    norm: batch
+    dropout: 0.0
+    head_activation: none
+    skips: true
+  enhancer:
+    name: docunet
+    base: 32
+    depth: 4
+    norm: batch
+    dropout: 0.0
+    residual_output: false
+    skips: true
+
+  # Where each half starts. Run names, resolved through the output root, so this
+  # follows SCANDAR_OUT onto Drive like everything else.
+  detector_weights: corner_heat
+  enhancer_weights: enhance_realistic
+
+  rect_size: [1024, 1448]
+  patch_size: 256
+  freeze_enhancer: true
+
+loss:
+  name: scan
+  # The enhancement loss, unchanged — the brief asks for fine-tuning *with* it.
+  l1: 1.0
+  msssim: 0.5
+  sobel: 0.25
+  # The corner anchor is off. If a run needs one to stay stable, turn it on as
+  # its own arm and report it as such; folded in silently it would mean the
+  # detector was being trained by its old supervision with the chain along for
+  # the ride, which is a different experiment.
+  coord_l1: 0.0
+
+train:
+  epochs: 5
+  iters_per_epoch: 150
+  batch_size: 4
+  grad_accum: 4           # effective batch 16, as everywhere else
+  lr: 2.0e-6              # a fine-tune: two orders below the detector's own run
+  min_lr: 1.0e-8
+  warmup_epochs: 0.5
+
+log:
+  # Steer on the number the bonus is about — how well the chain restores the page
+  # — not on the corner error, which is the old task's metric.
+  keep_best_on: val_psnr
+  best_mode: max
