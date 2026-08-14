@@ -1,0 +1,4 @@
+split,variant,n,psnr,psnr_std,ssim,corner_err_px,pck,quad_iou
+Test,degraded input,200,15.305,4.878,0.8489,,,
+Test,"chain, detected corners",200,19.008,1.775,0.8375,0.659,0.99,0.9879
+Test,"chain, true corners",200,26.704,2.533,0.9537,,,
