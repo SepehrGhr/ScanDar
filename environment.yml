@@ -4,10 +4,6 @@
 #   conda activate scandar
 #   pip install -e .
 #
-# The existing local env is named `cv`; this file recreates it as `scandar` on a
-# fresh machine. Training targets an RTX 3060 (6 GB) — the cu121 wheels below need
-# an NVIDIA driver >= 530.
-#
 # On Google Colab, do NOT use this file: the runtime already has torch + CUDA.
 # Run notebooks/00_colab_bootstrap.ipynb instead, which installs requirements.txt.
 
@@ -19,16 +15,15 @@ channels:
 dependencies:
   - python=3.11
   - pip
-  - tesseract   # the OCR engine binary itself; pytesseract below is only the wrapper
+  - tesseract
 
   - pip:
-      # CUDA 12.1 build of PyTorch — matches the local RTX 3060 setup
       - --extra-index-url https://download.pytorch.org/whl/cu121
       - torch==2.5.1
       - torchvision==0.20.1
 
       - numpy==2.0.1
-      - opencv-python-headless>=4.9      # code targets the 4.x API; 5.0.0 verified too
+      - opencv-python-headless>=4.9
       - pillow>=10
       - pyyaml>=6
       - matplotlib>=3.8
@@ -36,9 +31,5 @@ dependencies:
       - tqdm>=4.66
       - pytest>=8
       - ipykernel>=6
-      - pytesseract>=0.3.10   # OCR readability study *(brief §3.3)*; needs the tesseract binary too:
-                              #   conda install -c conda-forge tesseract
-      - gradio>=4             # app/demo.py
-
-      # Not needed until the part of the project that uses them; uncomment then:
-      # - kornia>=0.7           # differentiable warping, for the end-to-end scanner
+      - pytesseract>=0.3.10
+      - gradio>=4
